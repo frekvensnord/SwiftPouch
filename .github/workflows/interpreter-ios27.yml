@@ -11,7 +11,7 @@ permissions:
 jobs:
   validate:
     name: Xcode 27 / Swift 6.4
-    runs-on: xcode-27-arm64
+    runs-on: xcode-27
     timeout-minutes: 90
 
     steps:
