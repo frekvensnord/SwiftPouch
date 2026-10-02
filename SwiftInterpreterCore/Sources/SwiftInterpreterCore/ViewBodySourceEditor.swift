@@ -480,7 +480,7 @@ private final class StateReferenceVisitor: SyntaxVisitor {
             return .visitChildren
         }
         if isProjection && !projectedReferencesAllowed {
-            unsupportedProjectedPropertyName = propertyName(from: rawName)
+            unsupportedProjectedPropertyName = propertyName
             return .visitChildren
         }
         let start = projectedPrefix?.positionAfterSkippingLeadingTrivia.utf8Offset
