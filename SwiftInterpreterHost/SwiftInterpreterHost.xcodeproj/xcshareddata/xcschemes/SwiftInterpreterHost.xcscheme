@@ -7,10 +7,10 @@
          </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
-   <TestAction buildConfiguration="Debug" shouldUseLaunchSchemeArgsEnv="YES">
+   <TestAction buildConfiguration="Debug" shouldUseLaunchSchemeArgsEnv="NO">
       <Testables/>
    </TestAction>
-   <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+   <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB">
       <BuildableProductRunnable runnableDebuggingMode="0">
          <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A1000000000000000000000A" BuildableName="SwiftInterpreterHost.app" BlueprintName="SwiftInterpreterHost" ReferencedContainer="container:SwiftInterpreterHost.xcodeproj"/>
       </BuildableProductRunnable>
