@@ -263,11 +263,7 @@ private final class RuntimeRequirementVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
-        guard let attributes = node.attributes else {
-            return .visitChildren
-        }
-
-        for element in attributes {
+        for element in node.attributes {
             guard case .attribute(let attribute) = element else { continue }
             let fullName = attribute.attributeName.trimmedDescription
             let attributeName = fullName.split(separator: ".").last.map(String.init) ?? fullName

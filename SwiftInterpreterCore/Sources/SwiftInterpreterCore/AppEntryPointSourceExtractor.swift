@@ -127,10 +127,7 @@ public struct AppEntryPointSourceExtractor: Sendable {
     }
 
     private func hasMainAttribute(_ declaration: StructDeclSyntax) -> Bool {
-        guard let attributes = declaration.attributes else {
-            return false
-        }
-        return attributes.contains { element in
+        return declaration.attributes.contains { element in
             guard case .attribute(let attribute) = element else {
                 return false
             }

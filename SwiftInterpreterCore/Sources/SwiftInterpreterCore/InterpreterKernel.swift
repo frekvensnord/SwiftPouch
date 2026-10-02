@@ -529,8 +529,7 @@ public actor InterpreterKernel {
                 selecting: conditionValue
             )
             let replacedRange = conditional.startUTF8Offset..<conditional.endUTF8Offset
-            let replacementRange = conditional.startUTF8Offset
-                ..<(conditional.startUTF8Offset + replacement.utf8.count)
+            let replacementRange = conditional.startUTF8Offset..<(conditional.startUTF8Offset + replacement.utf8.count)
             bindingScopes = try adjustedBindingScopes(
                 bindingScopes,
                 replacing: replacedRange,

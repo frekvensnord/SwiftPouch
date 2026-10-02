@@ -125,10 +125,7 @@ struct ViewBodySourceEditor: Sendable {
     }
 
     private func hasStateAttribute(_ variable: VariableDeclSyntax) -> Bool {
-        guard let attributes = variable.attributes else {
-            return false
-        }
-        return attributes.contains { element in
+        return variable.attributes.contains { element in
             guard case .attribute(let attribute) = element else {
                 return false
             }

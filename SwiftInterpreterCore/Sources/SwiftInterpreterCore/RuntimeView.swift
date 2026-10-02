@@ -259,8 +259,12 @@ public struct SwiftUIRuntimeRenderer: View {
         render(node)
     }
 
+    private func render(_ node: RuntimeViewNode) -> AnyView {
+        AnyView(renderContent(node))
+    }
+
     @ViewBuilder
-    private func render(_ node: RuntimeViewNode) -> some View {
+    private func renderContent(_ node: RuntimeViewNode) -> some View {
         switch node {
         case .empty:
             EmptyView()

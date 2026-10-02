@@ -172,7 +172,7 @@ struct CustomViewSourceExpander: Sendable {
                 }
 
                 guard variable.bindingSpecifier.text == "let",
-                      case nil = variable.attributes,
+                      variable.attributes.isEmpty,
                       variable.modifiers.isEmpty,
                       variable.bindings.count == 1,
                       let binding = variable.bindings.first,
