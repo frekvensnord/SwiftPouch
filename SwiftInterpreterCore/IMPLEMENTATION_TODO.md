@@ -10,8 +10,8 @@ The actual target is an iPhone 13 running iOS 27. The host and package currently
 have an iOS 26 minimum deployment target, which is retained while validating
 the app on iOS 27. The developer workflow uses GitHub Actions, so package
 resolution, tests, and the host build run on a GitHub-hosted macOS runner; no
-local Mac is required. SwiftScript and ShellKit currently follow their `main`
-branches; establish a working graph there, then pin it before Step 27.
+local Mac is required. SwiftScript is vendored from the fixed upstream commit
+`d298d01`; ShellKit and SwiftSyntax use fixed revisions.
 
 1. Add a GitHub Actions workflow using a GitHub-hosted macOS runner. Select
    Xcode 27, its iOS 27 SDK, and Swift 6.4 explicitly, and log the selected
@@ -21,31 +21,24 @@ branches; establish a working graph there, then pin it before Step 27.
    record the SwiftScript, ShellKit, SwiftSyntax, and transitive revisions.
    Keep Swift tools version 6.3 and host Swift language mode 6.0 for the first
    build; change either only if CI reports a concrete incompatibility.
-3. Verify that the SwiftSyntax release works with Xcode 27's Swift 6.4
-   compiler. The current `603.0.0+` requirement follows the Swift 6.3 line, so
-   retain it only if it builds and passes tests; otherwise select a compatible
-   stable release and a compatible SwiftScript revision.
-4. Pin the passing SwiftScript and ShellKit revisions, lock the compatible
-   SwiftSyntax release and transitive graph, and record Xcode, Swift, iOS SDK,
-   and dependency revisions. Rerun the GitHub Actions workflow from that
-   frozen graph.
+3. Verify SwiftSyntax 603.0.2 against Xcode 27's Swift 6.4 compiler.
+4. Commit both resolved package graphs and rerun GitHub Actions from the
+   frozen graph. SwiftScript is vendored with narrow interpreter fixes;
+   ShellKit is fixed at `40c1b41`, and SwiftSyntax at 603.0.2.
 5. Use the CI-produced host build for a smoke test on the iPhone 13 running
    iOS 27: open a `.swift` file from Files/iCloud Drive, retain its link, and
    reload edited contents with Reload & Run. Any required signing or
    distribution is handled through the CI build path; no local Mac is needed.
 
-**Execution status:** The workflow is prepared at
-`.github/workflows/interpreter-ios27.yml`. Its first run, verification of the
-603 SwiftSyntax line against Swift 6.4, dependency locking, and the device
-smoke test are still pending. This workspace has no Git remote and no
-connected GitHub repository, so the workflow cannot be dispatched from this
-session. Keep Step 27 blocked until the workflow has passed and its resolved
-dependency graph has been committed as `Package.resolved`.
+**Execution status:** Run #15 passed 72/72 core tests and built the unsigned
+iOS host with Xcode 27.0, Swift 6.4, and the iOS 27.0 SDK. Both resolved graphs
+are committed; CI verifies them on every push. Installing the
+artifact and trying Files/iCloud Reload & Run on an iPhone 13 remains a device
+smoke test; it requires signing and access to the device.
 
 **Done when:** GitHub Actions passes dependency resolution, core tests, and the
-iOS host build with Xcode 27/Swift 6.4; the CI-produced build passes the linked-
-file reload smoke test on the iPhone 13 running iOS 27; and the dependency
-graph is pinned and reproducible.
+iOS host build with Xcode 27/Swift 6.4 from the committed dependency graph.
+The physical-device reload smoke test is tracked separately from this CI gate.
 
 ## Step 27 — Implement `@State` and `@Binding`
 

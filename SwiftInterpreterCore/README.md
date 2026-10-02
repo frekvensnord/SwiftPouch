@@ -487,25 +487,17 @@ host launches for the linked source and workspace to reopen.
 
 ## Dependencies
 
-- `SwiftScriptInterpreter` from `https://github.com/Cocoanetics/SwiftScript.git`
-- `ShellKit` from `https://github.com/Cocoanetics/ShellKit.git`
-- `SwiftParser` and `SwiftSyntax` from `https://github.com/swiftlang/swift-syntax` (currently 603.0.0+)
+- `SwiftScriptInterpreter` and `SwiftScriptAST` from `../Vendor/SwiftScript`
+  (upstream commit `d298d01`, with the targeted runtime changes documented there)
+- `ShellKit` at revision `40c1b417e6c6318d2ca644d9a3062dc6befd0e31`
+- `SwiftParser` and `SwiftSyntax` from swift-syntax 603.0.2
 
 The package declares iOS 26 and macOS 13 as minimum deployment targets and
 uses Swift tools 6.3. The actual device target is iPhone 13 running iOS 27;
-Step 26 uses Xcode 27, the iOS 27 SDK, and its Swift 6.4 compiler. SwiftSyntax
-603 is aligned with Swift 6.3, so its compatibility with Swift 6.4 must be
-verified in that toolchain; Step 26 selects and pins the compatible release.
-
-The package currently tracks the SwiftScript and ShellKit `main` branches, and
-does not yet include a `Package.resolved`. Step 26 adds a GitHub Actions
-workflow that resolves and verifies the graph, runs core tests, and builds the
-host on a GitHub-hosted macOS runner with Xcode 27/Swift 6.4. It then records
-exact SwiftScript and ShellKit revisions, locks the SwiftSyntax release
-compatible with Swift 6.4 and the transitive graph, and repeats CI against
-those pins. The resulting build is used for the iPhone 13/iOS 27 smoke test.
-The remaining runtime steps depend on that frozen baseline. Step 36 rechecks
-reproducibility using the dependency graph frozen in Step 26.
+Step 26 uses Xcode 27.0, the iOS 27.0 SDK, and Swift 6.4. Both the core package
+and host project commit their resolved graphs. Run #15 passed 72 core tests
+and built the unsigned iOS host. The iPhone 13/iOS 27 installation and reload
+smoke test remains a separate device check. Step 36 rechecks reproducibility.
 
 ## Build and test
 

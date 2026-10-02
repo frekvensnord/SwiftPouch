@@ -45,21 +45,12 @@ the compatibility list as current.
 
 `Package.swift` declares iOS 26 and macOS 13, with Swift tools 6.3. The target
 device is an iPhone 13 running iOS 27; CI uses a GitHub-hosted macOS runner
-with Xcode 27 / Swift 6.4. SwiftScript and ShellKit still track their `main`
-branches, and the package has no
-`Package.resolved`. The current SwiftSyntax requirement starts at 603.0.0, a
-release line aligned with Swift 6.3; Step 26 must verify that it builds with the
-Xcode 27 compiler and select a compatible stable release before pinning. The
-host project's `SWIFT_VERSION = 6.0` is its language-mode setting. The
-current workspace has no `swift` executable, so the existing XCTest suite has
-not yet established a known-working revision set. The Xcode 27 / Swift 6.4
-GitHub Actions workflow is prepared at `.github/workflows/interpreter-ios27.yml`;
-its first remote run is pending because this workspace has no Git remote or
-connected repository. CI is configured to resolve and test the current graph,
-build the unsigned host against the iOS device SDK, and upload logs plus
-`Package.resolved` files. The SwiftSyntax 603 compatibility decision and
-dependency pins must wait for that result. A signed build and target-device
-smoke test remain pending; they require a CI-connected repository and whatever
-Apple signing/distribution credentials the chosen device install path needs.
+with Xcode 27 / Swift 6.4. SwiftScript is vendored from `d298d01` with focused
+runtime fixes; ShellKit is pinned to `40c1b41`, SwiftSyntax to 603.0.2, and
+both package graphs have `Package.resolved`. Run #15 passed all 72 XCTest cases
+and the unsigned device-SDK host build under Xcode 27.0 / Swift 6.4 / iOS SDK
+27.0. The host project's `SWIFT_VERSION = 6.0` remains its language-mode
+setting. A signed installation and Files/iCloud Reload & Run smoke test on the
+iPhone 13 still require the physical device and a signing path.
 The iOS 26 minimum deployment target remains valid for running on iOS 27. The
 test files remain under `Tests/SwiftInterpreterCoreTests`.
