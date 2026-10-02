@@ -92,6 +92,16 @@ jobs:
 
           test -d "$CI_DERIVED_DATA/Build/Products/Debug-iphoneos/SwiftInterpreterHost.app"
 
+      - name: Collect xcodebuild crash diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          reports="$HOME/Library/Logs/DiagnosticReports"
+          if test -d "$reports"; then
+            find "$reports" -maxdepth 1 -type f -iname 'xcodebuild*' \
+              -exec cp {} "$CI_LOG_DIR/" \;
+          fi
+
       - name: Upload toolchain, dependency locks, logs, and unsigned host build
         if: always()
         uses: actions/upload-artifact@v6
