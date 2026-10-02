@@ -17,6 +17,27 @@ public struct RuntimeActionID: Codable, Hashable, Sendable {
     }
 }
 
+/// A deterministic, type-tagged identifier for an interpreted collection row.
+public struct RuntimeForEachID: Codable, Hashable, Sendable {
+    public let rawValue: String
+
+    public init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+}
+
+/// One lowered collection row. Its identity comes from the interpreted
+/// element's `Identifiable.id` or the explicit `ForEach(_:id:)` key path.
+public struct RuntimeForEachItem: Codable, Equatable, Sendable, Identifiable {
+    public let id: RuntimeForEachID
+    public let content: RuntimeViewNode
+
+    public init(id: RuntimeForEachID, content: RuntimeViewNode) {
+        self.id = id
+        self.content = content
+    }
+}
+
 /// The host app's current scene lifecycle state, exposed to interpreted views.
 public enum RuntimeScenePhase: String, Codable, Hashable, Sendable {
     case active
@@ -226,6 +247,7 @@ public indirect enum RuntimeViewNode: Codable, Equatable, Sendable {
     case strokedShape(shape: RuntimeShape, color: RuntimeColorValue, lineWidth: Double)
     case modified(content: RuntimeViewNode, modifier: RuntimeViewModifier)
     case group([RuntimeViewNode])
+    case forEach([RuntimeForEachItem])
     case verticalStack(
         alignment: RuntimeHorizontalAlignment,
         spacing: Double?,
@@ -311,6 +333,10 @@ public struct SwiftUIRuntimeRenderer: View {
                 ForEach(children.indices, id: \.self) { index in
                     render(children[index])
                 }
+            }
+        case .forEach(let items):
+            ForEach(items, id: \.id) { item in
+                render(item.content)
             }
         case .verticalStack(let alignment, let spacing, let children):
             VStack(alignment: horizontalAlignment(alignment), spacing: spacing.map { CGFloat($0) }) {

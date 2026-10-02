@@ -1,4 +1,4 @@
-# SwiftInterpreterCore — Schritt 25.3 (Zwischenstand)
+# SwiftInterpreterCore — aktueller Projektstand
 
 Swift Package wrapper around the embedded SwiftScript interpreter.
 
@@ -497,7 +497,7 @@ uses Swift tools 6.3. The actual device target is iPhone 13 running iOS 27;
 Step 26 uses Xcode 27.0, the iOS 27.0 SDK, and Swift 6.4. Both the core package
 and host project commit their resolved graphs. Run #15 passed 72 core tests
 and built the unsigned iOS host. The iPhone 13/iOS 27 installation and reload
-smoke test remains a separate device check. Step 36 rechecks reproducibility.
+smoke test remains a separate device check. Step 35 rechecks reproducibility.
 
 ## Build and test
 
@@ -520,7 +520,7 @@ direct `$state` projection into a custom view's `@Binding` property as a
 writable alias to the same cell. A child `@Binding` projection is retained
 when passed onward to another custom view. The supported initializers remain
 plain String and Bool literals; native controls, nested state-owning views,
-and dynamic repeated-view identity are later work. `@StateObject`,
+and state owned by nested or dynamically repeated view instances are later work. `@StateObject`,
 `@ObservedObject` and `@Published` remain later bridges. Step 28.1 routes the
 host's scene phase into interpreted bodies. Step 28.2 rewrites direct
 `@Environment(\.dismiss)` calls in interpreted actions into host-dismissal
@@ -534,3 +534,17 @@ Whole-source preflight still blocks these app-view wrappers because it does
 not run the specialized body-lowering path. Step 16 handles simple identifier
 let bindings in view-expression snapshots. Step 15 handles dynamic Boolean
 `.disabled` snapshots; other modifier parameters are not implemented yet.
+
+### Step 29.1 — Stable `ForEach` rows and live collections
+
+- The kernel expands Array, Set, and integer-range `ForEach` inputs from the
+  current interpreter scope. It supports implicit `Identifiable.id` and
+  explicit simple key paths such as `\.id` and `\.self`.
+- IDs are type-tagged and stable across view rebuilds; duplicate or
+  unrepresentable IDs fail with a focused lowering diagnostic. Row contents
+  are reevaluated from current values and each row's item value is retained
+  for its button actions.
+- This is collection lowering, not the pending observation bridge: direct
+  `ChatStore` and `CodexSessionManager` updates still require the
+  `@StateObject`/`@ObservedObject`/`@Published` integration. Scroll containers
+  and programmatic scrolling remain in Step 29.2.

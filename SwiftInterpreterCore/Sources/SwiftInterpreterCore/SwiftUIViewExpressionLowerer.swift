@@ -12,6 +12,9 @@ public enum RuntimeViewLoweringError: Error, LocalizedError, Equatable, Sendable
     case unsupportedArgument(String)
     case invalidLiteral(String)
     case missingViewBuilderClosure(String)
+    case unsupportedForEach(String)
+    case duplicateForEachIdentifier(String)
+    case unstableForEachIdentifier(String)
 
     public var errorDescription: String? {
         switch self {
@@ -31,6 +34,12 @@ public enum RuntimeViewLoweringError: Error, LocalizedError, Equatable, Sendable
             return "The literal supplied to '\(name)' is outside the supported static subset."
         case .missingViewBuilderClosure(let name):
             return "The '\(name)' view requires a trailing view-builder closure."
+        case .unsupportedForEach(let detail):
+            return "This ForEach form is not supported by the runtime yet: \(detail)"
+        case .duplicateForEachIdentifier(let identifier):
+            return "ForEach contains a duplicate stable identifier: \(identifier)"
+        case .unstableForEachIdentifier(let typeName):
+            return "ForEach cannot form a stable identifier from values of type '\(typeName)'."
         }
     }
 }
@@ -50,6 +59,7 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     private let resolvedDynamicConditions: [String: Bool]
     private let resolvedDynamicBooleans: [String: Bool]
     private let resolvedDynamicBooleanSites: [Int: Bool]
+    private let forEachBindingsByActionOffset: [Int: [RuntimeForEachItemBinding]]
     private let actionRecorder: RuntimeActionRecorder?
 
     public init() {
@@ -58,6 +68,7 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         self.resolvedDynamicConditions = [:]
         self.resolvedDynamicBooleans = [:]
         self.resolvedDynamicBooleanSites = [:]
+        self.forEachBindingsByActionOffset = [:]
         self.actionRecorder = nil
     }
 
@@ -67,6 +78,7 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         resolvedDynamicBooleans: [String: Bool] = [:],
         resolvedDynamicStringSites: [Int: String] = [:],
         resolvedDynamicBooleanSites: [Int: Bool] = [:],
+        forEachBindingsByActionOffset: [Int: [RuntimeForEachItemBinding]] = [:],
         actionRecorder: RuntimeActionRecorder? = nil
     ) {
         self.resolvedDynamicStrings = resolvedDynamicStrings
@@ -74,6 +86,7 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         self.resolvedDynamicConditions = resolvedDynamicConditions
         self.resolvedDynamicBooleans = resolvedDynamicBooleans
         self.resolvedDynamicBooleanSites = resolvedDynamicBooleanSites
+        self.forEachBindingsByActionOffset = forEachBindingsByActionOffset
         self.actionRecorder = actionRecorder
     }
 
@@ -100,6 +113,7 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             resolvedDynamicBooleans: resolvedDynamicBooleans,
             resolvedDynamicStringSites: resolvedDynamicStringSites,
             resolvedDynamicBooleanSites: resolvedDynamicBooleanSites,
+            forEachBindingsByActionOffset: forEachBindingsByActionOffset,
             actionRecorder: recorder
         )
         let node = try lowerer.lower(source)
@@ -133,6 +147,13 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         let visitor = DynamicBooleanModifierExpressionVisitor()
         visitor.walk(syntaxTree)
         return visitor.sites.sorted { $0.utf8Offset < $1.utf8Offset }
+    }
+
+    func buttonCallOffsets(in source: String) throws -> [Int] {
+        let syntaxTree = try parseSyntaxTree(source)
+        let visitor = ButtonCallOffsetVisitor()
+        visitor.walk(syntaxTree)
+        return visitor.offsets.sorted()
     }
 
     private func parseSyntaxTree(_ source: String) throws -> SourceFileSyntax {
@@ -192,6 +213,8 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             return try lowerStack(call, isVertical: false)
         case "Group":
             return try lowerGroup(call)
+        case "__SwiftPouchForEachGroup":
+            return try lowerForEachGroup(call)
         case "EmptyView":
             guard call.arguments.isEmpty, hasNoTrailingClosures(call) else {
                 throw RuntimeViewLoweringError.unsupportedArgument(name)
@@ -207,6 +230,34 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         default:
             throw RuntimeViewLoweringError.unsupportedView(name)
         }
+    }
+
+    private func lowerForEachGroup(_ call: FunctionCallExprSyntax) throws -> RuntimeViewNode {
+        guard call.arguments.isEmpty,
+              call.additionalTrailingClosures.isEmpty,
+              let closure = call.trailingClosure else {
+            throw RuntimeViewLoweringError.unsupportedArgument("ForEach")
+        }
+
+        let items = try closure.statements.map { statement -> RuntimeForEachItem in
+            guard let expression = statement.item.as(ExprSyntax.self),
+                  let itemCall = expression.as(FunctionCallExprSyntax.self),
+                  itemCall.calledExpression.trimmedDescription == "__SwiftPouchForEachItem",
+                  itemCall.arguments.count == 1,
+                  let idArgument = itemCall.arguments.first,
+                  idArgument.label?.text == "id",
+                  itemCall.additionalTrailingClosures.isEmpty,
+                  let itemClosure = itemCall.trailingClosure else {
+                throw RuntimeViewLoweringError.unsupportedForEach(
+                    "the expanded collection contains an invalid row marker"
+                )
+            }
+
+            let id = try staticString(idArgument.expression, viewName: "ForEach id")
+            let content = try lowerViewBuilderStatements(itemClosure.statements)
+            return RuntimeForEachItem(id: RuntimeForEachID(rawValue: id), content: content)
+        }
+        return .forEach(items)
     }
 
     private func lowerText(_ call: FunctionCallExprSyntax) throws -> RuntimeViewNode {
@@ -321,7 +372,11 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
 
         let actionSource = actionClosure.statements.description
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let actionID = actionRecorder?.record(actionSource) ?? RuntimeActionID()
+        let actionOffset = call.positionAfterSkippingLeadingTrivia.utf8Offset
+        let actionID = actionRecorder?.record(
+            actionSource,
+            forEachBindings: forEachBindingsByActionOffset[actionOffset] ?? []
+        ) ?? RuntimeActionID()
         return .button(label: label, actionID: actionID, role: role)
     }
 
@@ -1103,6 +1158,24 @@ private final class DynamicTextExpressionVisitor: SyntaxVisitor {
     }
 }
 
+private final class ButtonCallOffsetVisitor: SyntaxVisitor {
+    private(set) var offsets: [Int] = []
+
+    init() {
+        super.init(viewMode: .sourceAccurate)
+    }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        if isInsideButtonActionClosure(node) {
+            return .skipChildren
+        }
+        if node.calledExpression.trimmedDescription == "Button" {
+            offsets.append(node.positionAfterSkippingLeadingTrivia.utf8Offset)
+        }
+        return .visitChildren
+    }
+}
+
 private final class DynamicConditionExpressionVisitor: SyntaxVisitor {
     private(set) var expressions: Set<String> = []
 
@@ -1166,23 +1239,31 @@ struct DynamicViewExpressionSite: Sendable, Hashable {
 
 struct LoweredRuntimeView: Sendable {
     let node: RuntimeViewNode
-    let actions: [RuntimeActionID: String]
+    let actions: [RuntimeActionID: RuntimeActionRegistration]
+}
+
+struct RuntimeActionRegistration: Sendable {
+    let source: String
+    let forEachBindings: [RuntimeForEachItemBinding]
 }
 
 final class RuntimeActionRecorder: @unchecked Sendable {
     private let lock = NSLock()
-    private var actions: [RuntimeActionID: String] = [:]
+    private var actions: [RuntimeActionID: RuntimeActionRegistration] = [:]
 
-    func record(_ source: String) -> RuntimeActionID {
+    func record(
+        _ source: String,
+        forEachBindings: [RuntimeForEachItemBinding] = []
+    ) -> RuntimeActionID {
         lock.lock()
         defer { lock.unlock() }
 
         let id = RuntimeActionID()
-        actions[id] = source
+        actions[id] = RuntimeActionRegistration(source: source, forEachBindings: forEachBindings)
         return id
     }
 
-    func snapshot() -> [RuntimeActionID: String] {
+    func snapshot() -> [RuntimeActionID: RuntimeActionRegistration] {
         lock.lock()
         defer { lock.unlock() }
         return actions

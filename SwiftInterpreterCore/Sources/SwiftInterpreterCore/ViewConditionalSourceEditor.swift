@@ -167,7 +167,7 @@ private final class FirstConditionalVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: IfExprSyntax) -> SyntaxVisitorContinueKind {
-        if isInsideButtonActionClosure(node) {
+        if isInsideButtonActionClosure(node) || isInsideForEachClosure(node) {
             return .skipChildren
         }
         if conditional == nil {
@@ -175,4 +175,16 @@ private final class FirstConditionalVisitor: SyntaxVisitor {
         }
         return .skipChildren
     }
+}
+
+private func isInsideForEachClosure(_ node: some SyntaxProtocol) -> Bool {
+    var ancestor = node.parent
+    while let current = ancestor {
+        if let call = current.as(FunctionCallExprSyntax.self),
+           call.calledExpression.trimmedDescription == "ForEach" {
+            return true
+        }
+        ancestor = current.parent
+    }
+    return false
 }

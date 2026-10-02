@@ -6,6 +6,7 @@ private struct ActiveBindingScope: Sendable {
     var lowerBound: Int
     var upperBound: Int
     let bindings: [ViewConditionalBinding]
+    let forEachBindings: [RuntimeForEachItemBinding]
 }
 
 private struct ResolvedConditionalSource: Sendable {
@@ -16,6 +17,7 @@ private struct ResolvedConditionalSource: Sendable {
 private struct ScopedExpressionKey: Hashable {
     let expression: String
     let bindings: [ViewConditionalBinding]
+    let forEachBindings: [RuntimeForEachItemBinding]
 }
 
 /// The value and console output produced by one source evaluation.
@@ -70,6 +72,7 @@ public actor InterpreterKernel {
     private let sourceFileStore: ProjectSourceFileStore
     private let viewExpressionLowerer: SwiftUIViewExpressionLowerer
     private let viewConditionalSourceEditor: ViewConditionalSourceEditor
+    private let viewForEachSourceEditor: ViewForEachSourceEditor
     private let viewBodySourceEditor: ViewBodySourceEditor
     private let customViewSourceExpander: CustomViewSourceExpander
     private let appEntryPointSourceExtractor: AppEntryPointSourceExtractor
@@ -77,7 +80,8 @@ public actor InterpreterKernel {
     private var interpreter = Interpreter()
     private var optionalVariableTypes: [String: String] = [:]
     private var initializedViewStateOwners: [String: String] = [:]
-    private var registeredRuntimeActions: [RuntimeActionID: String] = [:]
+    private var registeredRuntimeActions: [RuntimeActionID: RuntimeActionRegistration] = [:]
+    private let forEachTemporaryPrefix = "__swiftpouch_runtime_foreach_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
     private var currentScenePhase: RuntimeScenePhase = .active
     private var interpreterScenePhase: RuntimeScenePhase?
     private var interpreterDismissBridgeInstalled = false
@@ -90,6 +94,7 @@ public actor InterpreterKernel {
         self.sourceFileStore = ProjectSourceFileStore(workspace: workspace)
         self.viewExpressionLowerer = SwiftUIViewExpressionLowerer()
         self.viewConditionalSourceEditor = ViewConditionalSourceEditor()
+        self.viewForEachSourceEditor = ViewForEachSourceEditor()
         self.viewBodySourceEditor = ViewBodySourceEditor()
         self.customViewSourceExpander = CustomViewSourceExpander()
         self.appEntryPointSourceExtractor = AppEntryPointSourceExtractor()
@@ -126,13 +131,15 @@ public actor InterpreterKernel {
         stateDeclarations: [ViewStateDeclaration] = [],
         stateTypeName: String? = nil
     ) async throws -> RuntimeViewNode {
+        let containsForEach = try viewForEachSourceEditor.firstForEach(in: source) != nil
         let allTextSites = try viewExpressionLowerer.dynamicStringExpressionSites(in: source)
         let allTextExpressions = Array(Set(allTextSites.map(\.expression))).sorted()
         let dynamicConditions = try viewExpressionLowerer.dynamicBooleanConditions(in: source)
         let dynamicDisabledExpressions = try viewExpressionLowerer.dynamicBooleanModifierArguments(in: source)
         guard !allTextSites.isEmpty
                 || !dynamicConditions.isEmpty
-                || !dynamicDisabledExpressions.isEmpty else {
+                || !dynamicDisabledExpressions.isEmpty
+                || containsForEach else {
             let loweredView = try viewExpressionLowerer.lowerRecordingActions(source)
             if let stateTypeName {
                 try await seedViewStateDeclarations(stateDeclarations, typeName: stateTypeName)
@@ -144,17 +151,64 @@ public actor InterpreterKernel {
         let textPlaceholders = Dictionary(uniqueKeysWithValues: allTextExpressions.map { ($0, "") })
         let conditionPlaceholders = Dictionary(uniqueKeysWithValues: dynamicConditions.map { ($0, false) })
         let disabledPlaceholders = Dictionary(uniqueKeysWithValues: dynamicDisabledExpressions.map { ($0, false) })
+        let validationSource = containsForEach
+            ? try viewForEachSourceEditor.replacingForEachWithBodies(in: source)
+            : source
         _ = try SwiftUIViewExpressionLowerer(
             resolvedDynamicStrings: textPlaceholders,
             resolvedDynamicConditions: conditionPlaceholders,
             resolvedDynamicBooleans: disabledPlaceholders
-        ).lower(source)
+        ).lower(validationSource)
 
         if let stateTypeName {
             try await seedViewStateDeclarations(stateDeclarations, typeName: stateTypeName)
         }
-        let resolvedConditionals = try await resolveViewConditionalBranches(source)
-        let selectedSource = resolvedConditionals.source
+
+        var selectedSource = source
+        var bindingScopes: [ActiveBindingScope] = []
+        var expansionCount = 0
+        while true {
+            let resolvedConditionals = try await resolveViewConditionalBranches(
+                selectedSource,
+                bindingScopes: bindingScopes
+            )
+            selectedSource = resolvedConditionals.source
+            bindingScopes = resolvedConditionals.bindingScopes
+
+            guard let site = try viewForEachSourceEditor.firstForEach(in: selectedSource) else {
+                break
+            }
+            guard expansionCount < 1_024 else {
+                throw RuntimeViewLoweringError.unsupportedForEach(
+                    "too many nested or sibling collection expressions"
+                )
+            }
+
+            let replacement = try await expandForEach(
+                site,
+                in: selectedSource,
+                bindingScopes: bindingScopes
+            )
+            let replacedRange = site.startUTF8Offset..<site.endUTF8Offset
+            let replacementLength = replacement.source.utf8.count
+                - (selectedSource.utf8.count - replacedRange.count)
+            bindingScopes = try adjustedBindingScopes(
+                bindingScopes,
+                replacing: replacedRange,
+                replacementLength: replacementLength
+            )
+            bindingScopes.append(contentsOf: replacement.bindingScopes.map { scope in
+                ActiveBindingScope(
+                    lowerBound: scope.lowerBound,
+                    upperBound: scope.upperBound,
+                    bindings: [],
+                    forEachBindings: [scope.binding]
+                )
+            })
+            selectedSource = replacement.source
+            expansionCount += 1
+        }
+
         let selectedTextSites = try viewExpressionLowerer.dynamicStringExpressionSites(in: selectedSource)
         let selectedDisabledSites = try viewExpressionLowerer.dynamicBooleanModifierArgumentSites(in: selectedSource)
 
@@ -164,7 +218,7 @@ public actor InterpreterKernel {
         } else {
             resolvedStringSites = try await resolveDynamicTextExpressions(
                 selectedTextSites,
-                bindingScopes: resolvedConditionals.bindingScopes
+                bindingScopes: bindingScopes
             )
         }
 
@@ -174,15 +228,21 @@ public actor InterpreterKernel {
         } else {
             resolvedDisabledSites = try await resolveDynamicBooleanModifierArguments(
                 selectedDisabledSites,
-                bindingScopes: resolvedConditionals.bindingScopes
+                bindingScopes: bindingScopes
             )
         }
+
+        let actionBindings = try actionForEachBindings(
+            in: selectedSource,
+            bindingScopes: bindingScopes
+        )
 
         let loweredView = try SwiftUIViewExpressionLowerer(
             resolvedDynamicStrings: [:],
             resolvedDynamicBooleans: [:],
             resolvedDynamicStringSites: resolvedStringSites,
-            resolvedDynamicBooleanSites: resolvedDisabledSites
+            resolvedDynamicBooleanSites: resolvedDisabledSites,
+            forEachBindingsByActionOffset: actionBindings
         ).lowerRecordingActions(selectedSource)
         registeredRuntimeActions = loweredView.actions
         return loweredView.node
@@ -358,13 +418,13 @@ public actor InterpreterKernel {
         await acquireEvaluationSlot()
         defer { releaseEvaluationSlot() }
 
-        guard let actionSource = registeredRuntimeActions[actionID] else {
+        guard let action = registeredRuntimeActions[actionID] else {
             throw RuntimeActionError.unknownAction(actionID)
         }
-        guard !actionSource.isEmpty else {
+        guard !action.source.isEmpty else {
             return EvaluationResult(value: "", standardOutput: "")
         }
-        let result = try await evaluateLocked(actionSource, resetInterpreter: false)
+        let result = try await evaluateAction(action)
         let requestsHostDismissal = try await consumeHostDismissalRequest()
         return EvaluationResult(
             value: result.value,
@@ -541,7 +601,10 @@ public actor InterpreterKernel {
         initializedViewStateOwners[declaration.storageName] = typeName
     }
 
-    private func resolveViewConditionalBranches(_ source: String) async throws -> ResolvedConditionalSource {
+    private func resolveViewConditionalBranches(
+        _ source: String,
+        bindingScopes: [ActiveBindingScope]
+    ) async throws -> ResolvedConditionalSource {
         let output = OutputSink()
         let projectPath = workspace.rootURL.path
         let shell = Shell(
@@ -556,7 +619,10 @@ public actor InterpreterKernel {
 
         do {
             let resolvedSource = try await shell.withCurrent { @Sendable in
-                try await self.resolveViewConditionalBranchesInCurrentShell(source)
+                try await self.resolveViewConditionalBranchesInCurrentShell(
+                    source,
+                    bindingScopes: bindingScopes
+                )
             }
             output.finish()
             _ = await output.readAllString()
@@ -569,11 +635,12 @@ public actor InterpreterKernel {
     }
 
     private func resolveViewConditionalBranchesInCurrentShell(
-        _ source: String
+        _ source: String,
+        bindingScopes initialBindingScopes: [ActiveBindingScope]
     ) async throws -> ResolvedConditionalSource {
         var selectedSource = source
         var resolvedBranchCount = 0
-        var bindingScopes: [ActiveBindingScope] = []
+        var bindingScopes = initialBindingScopes
 
         while let conditional = try viewConditionalSourceEditor.firstConditional(in: selectedSource) {
             guard resolvedBranchCount < 1_024 else {
@@ -583,6 +650,10 @@ public actor InterpreterKernel {
             let conditionValue = try await evaluateConditional(
                 conditional,
                 activeBindings: activeBindings(
+                    at: conditional.startUTF8Offset,
+                    in: bindingScopes
+                ),
+                forEachBindings: activeForEachBindings(
                     at: conditional.startUTF8Offset,
                     in: bindingScopes
                 )
@@ -609,7 +680,8 @@ public actor InterpreterKernel {
                     ActiveBindingScope(
                         lowerBound: replacementRange.lowerBound,
                         upperBound: replacementRange.upperBound,
-                        bindings: conditional.bindings
+                        bindings: conditional.bindings,
+                        forEachBindings: []
                     )
                 )
             }
@@ -619,23 +691,242 @@ public actor InterpreterKernel {
         return ResolvedConditionalSource(source: selectedSource, bindingScopes: bindingScopes)
     }
 
+    private func expandForEach(
+        _ site: ViewForEachSite,
+        in source: String,
+        bindingScopes: [ActiveBindingScope]
+    ) async throws -> ViewForEachSourceReplacement {
+        let output = OutputSink()
+        let projectPath = workspace.rootURL.path
+        let shell = Shell(
+            stdout: output,
+            environment: Environment(variables: [
+                "HOME": projectPath,
+                "PWD": projectPath
+            ]),
+            sandbox: Sandbox.rooted(at: workspace.rootURL, allowedHosts: []),
+            hostInfo: .synthetic
+        )
+
+        do {
+            let replacement = try await shell.withCurrent { @Sendable in
+                try await self.expandForEachInCurrentShell(
+                    site,
+                    in: source,
+                    bindingScopes: bindingScopes
+                )
+            }
+            output.finish()
+            _ = await output.readAllString()
+            return replacement
+        } catch {
+            output.finish()
+            _ = await output.readAllString()
+            throw error
+        }
+    }
+
+    private func expandForEachInCurrentShell(
+        _ site: ViewForEachSite,
+        in source: String,
+        bindingScopes: [ActiveBindingScope]
+    ) async throws -> ViewForEachSourceReplacement {
+        let activeOptionalBindings = activeBindings(at: site.startUTF8Offset, in: bindingScopes)
+        let activeForEachBindings = activeForEachBindings(at: site.startUTF8Offset, in: bindingScopes)
+        let collection = try await evaluateViewExpression(
+            site.collectionExpression,
+            fallback: "[]",
+            activeBindings: activeOptionalBindings,
+            forEachBindings: activeForEachBindings
+        )
+        let elements = try forEachElements(from: collection)
+        let idPath = site.idKeyPath.flatMap(viewForEachSourceEditor.keyPathComponents)
+        var seenIdentifiers = Set<RuntimeForEachID>()
+        var expandedElements: [ViewForEachExpandedElement] = []
+        expandedElements.reserveCapacity(elements.count)
+
+        for element in elements {
+            let itemBinding = RuntimeForEachItemBinding(name: site.itemName, value: element)
+            let idExpression: String
+            if let idPath {
+                idExpression = idPath.reduce(site.itemName) { partial, component in
+                    component == "self" ? partial : "\(partial).\(component)"
+                }
+            } else {
+                idExpression = "\(site.itemName).id"
+            }
+            let idValue = try await evaluateViewExpression(
+                idExpression,
+                fallback: "nil",
+                activeBindings: activeOptionalBindings,
+                forEachBindings: activeForEachBindings + [itemBinding]
+            )
+            let identifier = try stableForEachIdentifier(idValue)
+            guard seenIdentifiers.insert(identifier).inserted else {
+                throw RuntimeViewLoweringError.duplicateForEachIdentifier(identifier.rawValue)
+            }
+            expandedElements.append(ViewForEachExpandedElement(
+                id: identifier,
+                binding: itemBinding,
+                bodySource: site.bodySource
+            ))
+        }
+
+        return try viewForEachSourceEditor.replacing(site, in: source, with: expandedElements)
+    }
+
+    private func forEachElements(from value: Value) throws -> [Value] {
+        let elements: [Value]
+        switch value {
+        case .array(let array):
+            elements = array
+        case .set(let set):
+            elements = set
+        case .range(let lower, let upper, let closed):
+            guard lower <= upper else {
+                throw RuntimeViewLoweringError.unsupportedForEach(
+                    "the evaluated range has an upper bound below its lower bound"
+                )
+            }
+            let distance = upper.subtractingReportingOverflow(lower)
+            guard !distance.overflow else {
+                throw RuntimeViewLoweringError.unsupportedForEach("the evaluated range is too large")
+            }
+            let countResult: (partialValue: Int, overflow: Bool) = closed
+                ? distance.partialValue.addingReportingOverflow(1)
+                : (distance.partialValue, false)
+            guard !countResult.overflow,
+                  countResult.partialValue >= 0,
+                  countResult.partialValue <= 10_000 else {
+                throw RuntimeViewLoweringError.unsupportedForEach(
+                    "collections are limited to 10,000 rows per view snapshot"
+                )
+            }
+            elements = (0..<countResult.partialValue).map { offset in
+                .int(lower + offset)
+            }
+        default:
+            throw RuntimeViewLoweringError.unsupportedForEach(
+                "expected an Array, Set, or integer range; got \(runtimeTypeName(of: value))"
+            )
+        }
+
+        guard elements.count <= 10_000 else {
+            throw RuntimeViewLoweringError.unsupportedForEach(
+                "collections are limited to 10,000 rows per view snapshot"
+            )
+        }
+        return elements
+    }
+
+    private func stableForEachIdentifier(_ value: Value) throws -> RuntimeForEachID {
+        RuntimeForEachID(rawValue: try stableIdentifierComponent(value))
+    }
+
+    private func stableIdentifierComponent(_ value: Value) throws -> String {
+        switch value {
+        case .int(let number):
+            return encodedIdentifier(tag: "Int", payload: String(number))
+        case .double(let number):
+            guard number.isFinite else {
+                throw RuntimeViewLoweringError.unstableForEachIdentifier("Double")
+            }
+            let bits = number == 0 ? 0 : number.bitPattern
+            return encodedIdentifier(tag: "Double", payload: String(bits, radix: 16))
+        case .string(let string):
+            return encodedIdentifier(tag: "String", payload: string)
+        case .bool(let boolean):
+            return encodedIdentifier(tag: "Bool", payload: String(boolean))
+        case .optional(let wrapped):
+            let payload: String
+            if let wrapped {
+                payload = try stableIdentifierComponent(wrapped)
+            } else {
+                payload = "nil"
+            }
+            return encodedIdentifier(
+                tag: "Optional",
+                payload: payload
+            )
+        case .tuple(let values, _):
+            let parts = try values.map(stableIdentifierComponent).joined()
+            return encodedIdentifier(tag: "Tuple[\(values.count)]", payload: parts)
+        case .structValue(let typeName, let fields):
+            let parts = try fields.map { field in
+                encodedIdentifier(tag: field.name, payload: try stableIdentifierComponent(field.value))
+            }.joined()
+            return encodedIdentifier(tag: "Struct:\(typeName)", payload: parts)
+        case .enumValue(let typeName, let caseName, let associatedValues):
+            let payload = try associatedValues.map(stableIdentifierComponent).joined()
+            return encodedIdentifier(
+                tag: "Enum:\(typeName):\(caseName)[\(associatedValues.count)]",
+                payload: payload
+            )
+        case .opaque(let typeName, let rawValue):
+            let payload: String
+            if let uuid = rawValue as? UUID {
+                payload = uuid.uuidString
+            } else if let string = rawValue as? String {
+                payload = string
+            } else if let url = rawValue as? URL {
+                payload = url.absoluteString
+            } else if let date = rawValue as? Date, date.timeIntervalSince1970.isFinite {
+                payload = String(date.timeIntervalSince1970.bitPattern, radix: 16)
+            } else if let data = rawValue as? Data {
+                payload = data.base64EncodedString()
+            } else {
+                throw RuntimeViewLoweringError.unstableForEachIdentifier(typeName)
+            }
+            return encodedIdentifier(tag: "Opaque:\(typeName)", payload: payload)
+        default:
+            throw RuntimeViewLoweringError.unstableForEachIdentifier(runtimeTypeName(of: value))
+        }
+    }
+
+    private func encodedIdentifier(tag: String, payload: String) -> String {
+        "\(tag.utf8.count):\(tag)\(payload.utf8.count):\(payload)"
+    }
+
+    private func runtimeTypeName(of value: Value) -> String {
+        switch value {
+        case .int: return "Int"
+        case .double: return "Double"
+        case .string: return "String"
+        case .bool: return "Bool"
+        case .void: return "Void"
+        case .function: return "Function"
+        case .range: return "Range<Int>"
+        case .array: return "Array"
+        case .optional: return "Optional"
+        case .tuple: return "Tuple"
+        case .dict: return "Dictionary"
+        case .set: return "Set"
+        case .opaque(let typeName, _): return typeName
+        case .structValue(let typeName, _): return typeName
+        case .classInstance(let instance): return instance.typeName
+        case .enumValue(let typeName, _, _): return typeName
+        }
+    }
+
     private func evaluateConditional(
         _ conditional: ViewConditionalSite,
-        activeBindings: [ViewConditionalBinding]
+        activeBindings: [ViewConditionalBinding],
+        forEachBindings: [RuntimeForEachItemBinding]
     ) async throws -> Bool {
         let conditionExpression: String
         if let directExpression = conditional.conditionExpression,
-           activeBindings.isEmpty {
+           activeBindings.isEmpty,
+           forEachBindings.isEmpty {
             conditionExpression = directExpression
         } else {
             conditionExpression = "if \(conditional.conditionSource) { true } else { false }"
         }
-        let scopedExpression = expressionWithOptionalBindings(
+        let value = try await evaluateViewExpression(
             conditionExpression,
             fallback: "false",
-            activeBindings: activeBindings
+            activeBindings: activeBindings,
+            forEachBindings: forEachBindings
         )
-        let value = try await interpreter.eval(scopedExpression)
         let displayValue = String(describing: value)
         guard displayValue == "true" || displayValue == "false" else {
             throw RuntimeViewLoweringError.unsupportedExpression(
@@ -716,17 +1007,22 @@ public actor InterpreterKernel {
         var cache: [ScopedExpressionKey: Bool] = [:]
         for site in sites {
             let activeBindings = activeBindings(at: site.utf8Offset, in: bindingScopes)
-            let key = ScopedExpressionKey(expression: site.expression, bindings: activeBindings)
+            let activeForEachBindings = activeForEachBindings(at: site.utf8Offset, in: bindingScopes)
+            let key = ScopedExpressionKey(
+                expression: site.expression,
+                bindings: activeBindings,
+                forEachBindings: activeForEachBindings
+            )
             if let cachedValue = cache[key] {
                 values[site.utf8Offset] = cachedValue
                 continue
             }
-            let scopedExpression = expressionWithOptionalBindings(
+            let value = try await evaluateViewExpression(
                 site.expression,
                 fallback: "false",
-                activeBindings: activeBindings
+                activeBindings: activeBindings,
+                forEachBindings: activeForEachBindings
             )
-            let value = try await interpreter.eval(scopedExpression)
             let displayValue = String(describing: value)
             guard displayValue == "true" || displayValue == "false" else {
                 throw RuntimeViewLoweringError.unsupportedExpression(
@@ -748,22 +1044,107 @@ public actor InterpreterKernel {
         var cache: [ScopedExpressionKey: String] = [:]
         for site in sites {
             let activeBindings = activeBindings(at: site.utf8Offset, in: bindingScopes)
-            let key = ScopedExpressionKey(expression: site.expression, bindings: activeBindings)
+            let activeForEachBindings = activeForEachBindings(at: site.utf8Offset, in: bindingScopes)
+            let key = ScopedExpressionKey(
+                expression: site.expression,
+                bindings: activeBindings,
+                forEachBindings: activeForEachBindings
+            )
             if let cachedValue = cache[key] {
                 values[site.utf8Offset] = cachedValue
                 continue
             }
-            let scopedExpression = expressionWithOptionalBindings(
+            let value = try await evaluateViewExpression(
                 site.expression,
                 fallback: "\"\"",
-                activeBindings: activeBindings
+                activeBindings: activeBindings,
+                forEachBindings: activeForEachBindings
             )
-            let value = try await interpreter.eval(scopedExpression)
             let resolvedValue = String(describing: value)
             cache[key] = resolvedValue
             values[site.utf8Offset] = resolvedValue
         }
         return values
+    }
+
+    private func evaluateAction(_ action: RuntimeActionRegistration) async throws -> EvaluationResult {
+        for (index, binding) in action.forEachBindings.enumerated() {
+            interpreter.rootScope.bind(
+                forEachTemporaryName(index),
+                value: binding.value,
+                mutable: false
+            )
+        }
+        defer { clearForEachTemporaryBindings(count: action.forEachBindings.count) }
+
+        let actionBody = action.forEachBindings.enumerated().reversed().reduce(action.source) {
+            nestedSource, element in
+            "({ \(element.element.name) in\n\(nestedSource)\n})(\(forEachTemporaryName(element.offset)))"
+        }
+        return try await evaluateLocked(actionBody, resetInterpreter: false)
+    }
+
+    /// Evaluates an expression as if it were inside the active view-builder
+    /// lexical scopes. Iteration values are temporarily bound in a private
+    /// namespace, then passed through ordinary interpreter closures so names
+    /// in user source keep their normal lexical meaning.
+    private func evaluateViewExpression(
+        _ expression: String,
+        fallback: String,
+        activeBindings: [ViewConditionalBinding],
+        forEachBindings: [RuntimeForEachItemBinding]
+    ) async throws -> Value {
+        for (index, binding) in forEachBindings.enumerated() {
+            interpreter.rootScope.bind(
+                forEachTemporaryName(index),
+                value: binding.value,
+                mutable: false
+            )
+        }
+        defer { clearForEachTemporaryBindings(count: forEachBindings.count) }
+
+        let expressionWithItems = forEachBindings.enumerated().reversed().reduce(expression) {
+            nestedExpression, element in
+            "({ \(element.element.name) in \(nestedExpression) })(\(forEachTemporaryName(element.offset)))"
+        }
+        let scopedExpression = expressionWithOptionalBindings(
+            expressionWithItems,
+            fallback: fallback,
+            activeBindings: activeBindings
+        )
+        return try await interpreter.eval(scopedExpression)
+    }
+
+    private func forEachTemporaryName(_ index: Int) -> String {
+        "\(forEachTemporaryPrefix)\(index)"
+    }
+
+    private func clearForEachTemporaryBindings(count: Int) {
+        for index in 0..<count {
+            interpreter.rootScope.bind(forEachTemporaryName(index), value: .void, mutable: false)
+        }
+    }
+
+    private func activeForEachBindings(
+        at offset: Int,
+        in scopes: [ActiveBindingScope]
+    ) -> [RuntimeForEachItemBinding] {
+        scopes
+            .filter { offset >= $0.lowerBound && offset < $0.upperBound }
+            .sorted { $0.lowerBound < $1.lowerBound }
+            .flatMap(\.forEachBindings)
+    }
+
+    private func actionForEachBindings(
+        in source: String,
+        bindingScopes: [ActiveBindingScope]
+    ) throws -> [Int: [RuntimeForEachItemBinding]] {
+        try viewExpressionLowerer.buttonCallOffsets(in: source).reduce(into: [:]) { result, offset in
+            let captures = activeForEachBindings(at: offset, in: bindingScopes)
+            if !captures.isEmpty {
+                result[offset] = captures
+            }
+        }
     }
 
     private func activeBindings(at offset: Int, in scopes: [ActiveBindingScope]) -> [ViewConditionalBinding] {
@@ -787,14 +1168,16 @@ public actor InterpreterKernel {
                 return ActiveBindingScope(
                     lowerBound: scope.lowerBound + offsetDelta,
                     upperBound: scope.upperBound + offsetDelta,
-                    bindings: scope.bindings
+                    bindings: scope.bindings,
+                    forEachBindings: scope.forEachBindings
                 )
             }
             if scope.lowerBound <= range.lowerBound && scope.upperBound >= range.upperBound {
                 return ActiveBindingScope(
                     lowerBound: scope.lowerBound,
                     upperBound: scope.upperBound + offsetDelta,
-                    bindings: scope.bindings
+                    bindings: scope.bindings,
+                    forEachBindings: scope.forEachBindings
                 )
             }
             throw RuntimeViewLoweringError.malformedSyntax

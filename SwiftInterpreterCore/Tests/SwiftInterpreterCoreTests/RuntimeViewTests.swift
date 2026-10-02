@@ -21,6 +21,12 @@ final class RuntimeViewTests: XCTestCase {
                     modifier: .overlay(alignment: .center, overlay: .shape(.circle))
                 ),
                 .group([.text("First"), .text("Second")]),
+                .forEach([
+                    RuntimeForEachItem(
+                        id: RuntimeForEachID(rawValue: "6:String4:chat"),
+                        content: .text("Identified row")
+                    )
+                ]),
                 .horizontalStack(
                     alignment: .center,
                     spacing: 6,
@@ -356,6 +362,22 @@ final class RuntimeViewTests: XCTestCase {
             .group([.text("first"), .text("second")])
         )
         XCTAssertEqual(try lowerer.lower("EmptyView()"), .empty)
+    }
+
+    func testLowererBuildsIdentifiedRowsFromKernelMarkers() throws {
+        let lowerer = SwiftUIViewExpressionLowerer()
+        let node = try lowerer.lower(#"__SwiftPouchForEachGroup { __SwiftPouchForEachItem(id: "6:String4:chat") { Text("Chat") }; __SwiftPouchForEachItem(id: "6:String4:help") { Text("Help") } }"#)
+
+        XCTAssertEqual(node, .forEach([
+            RuntimeForEachItem(
+                id: RuntimeForEachID(rawValue: "6:String4:chat"),
+                content: .text("Chat")
+            ),
+            RuntimeForEachItem(
+                id: RuntimeForEachID(rawValue: "6:String4:help"),
+                content: .text("Help")
+            )
+        ]))
     }
 
     func testLowererPreservesMultipleConditionalAndOverlayChildrenAsAGroup() throws {

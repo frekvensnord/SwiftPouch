@@ -1,8 +1,8 @@
 # Remaining implementation checklist
 
-This is the active plan after Step 25.3. Step 26 freezes a verified dependency
-baseline before the remaining runtime features are added, so each later step
-can build against the same tested interpreter and package APIs.
+This is the active implementation plan for the iPhone 13 / iOS 27 target.
+The current development branch is built incrementally from the Step 28.2
+checkpoint; `main` remains the last fully green baseline.
 
 ## Step 26 — Validate iOS 27 and freeze the dependency baseline
 
@@ -64,30 +64,39 @@ same-named state in different view types is isolated, a binding-backed child
 can both read and write its parent's cell, a subsequent body lowering shows
 that write, and interpreter reset restores each literal default.
 
-## Step 28 — Connect observable objects and published changes
+## Step 28 — Provide environment and host context
 
-Implement object lifetime, property access, and change notifications for
-`@StateObject`, `@ObservedObject`, and `@Published`.
+- **28.1 complete:** maps host `scenePhase` into interpreted view bodies.
+- **28.2 complete:** routes direct interpreted `dismiss()` calls to the native
+  presentation environment.
 
-**Done when:** changes in `ChatStore` or `CodexSessionManager` trigger another
-view evaluation, and each object survives for the appropriate host lifetime.
+`@StateObject`, `@ObservedObject`, and `@Published` remain an explicit carry-over
+before the unchanged target app can source live lists from `ChatStore` and
+`CodexSessionManager`. Do not mistake collection lowering in Step 29.1 for that
+object-observation bridge.
 
-## Step 29 — Provide environment and host context
+## Step 29 — Evaluate dynamic lists and scroll views
 
-Connect the target's `scenePhase` and `dismiss` environment values to the host.
+### Step 29.1 — `ForEach` identity and dynamic collections
 
-**Done when:** scene changes and dismissal of a presented view have the same
-effect in interpreted code as in the native host environment.
+Expand the currently available Array, Set, or integer-range values into
+identified runtime rows. Support `Identifiable.id` and explicit simple
+`id:` key paths, preserve each row's lexical item value for dynamic content and
+button actions, and rebuild from the latest interpreter values after refresh.
 
-## Step 30 — Evaluate dynamic lists and scroll views
+**Done when:** stable identities survive reordering, duplicate IDs and
+unsupported collection/ID forms fail clearly, and updated collection contents
+produce an updated row tree without reparsing or reselecting the data source.
 
-Add `ForEach` with stable IDs, dynamic collections, `ScrollView`, `LazyVStack`,
-and `ScrollViewReader` with its scroll proxy.
+### Step 29.2 — Scrolling and lazy-list containers
 
-**Done when:** message, history, model, and reasoning lists build from current
-app data and update when that data changes.
+Add `ScrollView`, `LazyVStack`, `ScrollViewReader`, and a host-backed scroll
+proxy that can target stable row IDs.
 
-## Step 31 — Add inputs and controls
+**Done when:** message, history, model, and reasoning rows can appear in their
+target containers and the chat view can scroll to its latest message.
+
+## Step 30 — Add inputs and controls
 
 Support the target's actual forms of `TextField`, `Picker`, `Menu`, `Form`,
 `Button` closures, and dynamic view values.
@@ -95,7 +104,7 @@ Support the target's actual forms of `TextField`, `Picker`, `Menu`, `Form`,
 **Done when:** composing, model and reasoning selection, and settings are
 operable, with edits flowing back into app state through bindings.
 
-## Step 32 — Add navigation, presentations, and view events
+## Step 31 — Add navigation, presentations, and view events
 
 Implement `NavigationStack`, toolbar components, sheets including item-based
 sheets, alerts, `.onAppear`, and `.onChange`.
@@ -103,7 +112,7 @@ sheets, alerts, `.onAppear`, and `.onChange`.
 **Done when:** history, settings, device-code dialogs, and notifications can be
 opened, updated, and dismissed from the target app.
 
-## Step 33 — Add Foundation, file-system, and UIKit bridges
+## Step 32 — Add Foundation, file-system, and UIKit bridges
 
 Provide the required forms of `URL`, `Data`, `Date`, `UUID`, JSON coding,
 `JSONSerialization`, `FileManager`, and String helpers. Scope file operations
@@ -112,7 +121,7 @@ to the current interpreter project. Map the used UIKit system background color.
 **Done when:** conversation and settings data can be read and written in the
 interpreter project's workspace.
 
-## Step 34 — Add project-scoped Security and Keychain access
+## Step 33 — Add project-scoped Security and Keychain access
 
 Implement the required Keychain constants and narrow host bridges for
 `SecItemCopyMatching`, `SecItemAdd`, `SecItemUpdate`, and `SecItemDelete`.
@@ -120,7 +129,7 @@ Implement the required Keychain constants and narrow host bridges for
 **Done when:** sign-in and stored credentials work through the intended
 Keychain calls and are isolated to the correct project context.
 
-## Step 35 — Connect GCD and URLSession streaming
+## Step 34 — Connect GCD and URLSession streaming
 
 First coordinate the required queue, work-item, and lock behavior with the
 serial runtime. Then implement `URLSession`, requests, callbacks, and the
@@ -129,7 +138,7 @@ delegate proxy for server-sent events.
 **Done when:** sign-in, model loading, response streaming, and cancellation
 remain ordered and cooperate correctly with the UI.
 
-## Step 36 — Accept the unchanged target app end to end
+## Step 35 — Accept the unchanged target app end to end
 
 Reload the original `.swift` file through its existing file link and verify
 the complete UI, chat, history, settings, Keychain sign-in, streaming,

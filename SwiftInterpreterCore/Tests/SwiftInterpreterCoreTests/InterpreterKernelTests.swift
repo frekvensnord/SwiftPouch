@@ -502,6 +502,124 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(interpolated, .text("Hallo Ada"))
     }
 
+    func testForEachLowersIdentifiableRowsWithStableIDsAndRefreshesFromCurrentData() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        struct Entry: Identifiable {
+            let id: String
+            let title: String
+        }
+        var entries = [Entry(id: "first", title: "Alpha"), Entry(id: "second", title: "Beta")]
+        """)
+
+        let source = "ForEach(entries) { entry in Text(entry.title) }"
+        let first = try await kernel.lowerViewExpression(source)
+        guard case .forEach(let firstItems) = first else {
+            return XCTFail("Expected an identified ForEach node")
+        }
+        XCTAssertEqual(firstItems.map(\.id.rawValue), ["6:String5:first", "6:String6:second"])
+        XCTAssertEqual(firstItems.map(\.content), [.text("Alpha"), .text("Beta")])
+
+        _ = try await kernel.evaluate("entries.append(Entry(id: \"third\", title: \"Gamma\"))")
+        let refreshed = try await kernel.lowerViewExpression(source)
+        guard case .forEach(let refreshedItems) = refreshed else {
+            return XCTFail("Expected the refreshed collection to remain a ForEach node")
+        }
+        XCTAssertEqual(refreshedItems.map(\.id), firstItems.map(\.id) + [RuntimeForEachID(rawValue: "6:String5:third")])
+        XCTAssertEqual(refreshedItems.map(\.content), [.text("Alpha"), .text("Beta"), .text("Gamma")])
+
+        _ = try await kernel.evaluate("entries = [entries[1], entries[0], entries[2]]")
+        let reordered = try await kernel.lowerViewExpression(source)
+        guard case .forEach(let reorderedItems) = reordered else {
+            return XCTFail("Expected reordering to preserve the identified collection node")
+        }
+        XCTAssertEqual(reorderedItems.map(\.id), [refreshedItems[1].id, refreshedItems[0].id, refreshedItems[2].id])
+        XCTAssertEqual(reorderedItems.map(\.content), [.text("Beta"), .text("Alpha"), .text("Gamma")])
+    }
+
+    func testForEachSupportsExplicitSelfIDsAndIntegerRanges() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("let levels = [\"low\", \"high\"]")
+
+        let strings = try await kernel.lowerViewExpression(
+            #"ForEach(levels, id: \.self) { level in Text(level) }"#
+        )
+        guard case .forEach(let levelItems) = strings else {
+            return XCTFail("Expected an explicit-ID ForEach node")
+        }
+        XCTAssertEqual(levelItems.map(\.content), [.text("low"), .text("high")])
+        XCTAssertEqual(levelItems.map(\.id.rawValue), ["6:String3:low", "6:String4:high"])
+
+        let numbers = try await kernel.lowerViewExpression(
+            #"ForEach(2..<5, id: \.self) { index in Text(index) }"#
+        )
+        guard case .forEach(let numberItems) = numbers else {
+            return XCTFail("Expected a range-backed ForEach node")
+        }
+        XCTAssertEqual(numberItems.map(\.content), [.text("2"), .text("3"), .text("4")])
+    }
+
+    func testForEachResolvesConditionsAndCapturesEachItemInActions() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        struct Entry: Identifiable {
+            let id: String
+            let title: String
+            let isVisible: Bool
+        }
+        var selectedID = ""
+        let entries = [
+            Entry(id: "hidden", title: "Hidden", isVisible: false),
+            Entry(id: "shown", title: "Shown", isVisible: true)
+        ]
+        """)
+
+        let node = try await kernel.lowerViewExpression("""
+        ForEach(entries) { entry in
+            if entry.isVisible {
+                Button("Choose") { selectedID = entry.id }
+            } else {
+                Text(entry.title)
+            }
+        }
+        """)
+        guard case .forEach(let items) = node,
+              items.count == 2,
+              case .text("Hidden") = items[0].content,
+              case .button(_, let actionID, _) = items[1].content else {
+            return XCTFail("Expected conditional content and a per-row action")
+        }
+
+        _ = try await kernel.performAction(actionID)
+        let selected = try await kernel.evaluate("selectedID")
+        XCTAssertEqual(selected.value, "shown")
+    }
+
+    func testForEachRejectsDuplicateIDsAndKeepsEmptyCollectionsEmpty() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        struct Entry { let id: String; let title: String }
+        let duplicateEntries = [Entry(id: "same", title: "A"), Entry(id: "same", title: "B")]
+        let noEntries: [String] = []
+        """)
+
+        do {
+            _ = try await kernel.lowerViewExpression(
+                "ForEach(duplicateEntries) { entry in Text(entry.title) }"
+            )
+            XCTFail("Duplicate identities must not produce ambiguous SwiftUI rows")
+        } catch let error as RuntimeViewLoweringError {
+            guard case .duplicateForEachIdentifier = error else {
+                return XCTFail("Expected a duplicate-ID diagnostic, got: \(error)")
+            }
+        }
+
+        let empty = try await kernel.lowerViewExpression(
+            "ForEach(noEntries, id: \\.self) { entry in Text(entry) }"
+        )
+        XCTAssertEqual(empty, .forEach([]))
+    }
+
     func testLowerViewBodyExtractsTheNamedStructAndUsesInterpreterScope() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         _ = try await kernel.evaluate("var bodyCaption = \"first\"")
@@ -1485,6 +1603,8 @@ final class InterpreterKernelTests: XCTestCase {
             return [value]
         case .group(let children), .verticalStack(_, _, let children), .horizontalStack(_, _, let children):
             return children.flatMap { textValues(in: $0) }
+        case .forEach(let items):
+            return items.flatMap { textValues(in: $0.content) }
         case .modified(let content, _):
             return textValues(in: content)
         default:
