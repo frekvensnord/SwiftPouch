@@ -1460,8 +1460,10 @@ final class InterpreterKernelTests: XCTestCase {
             @Environment(\\.dismiss) private var dismiss
 
             var body: some View {
-                let close = dismiss
-                Button("Close") { close() }
+                Button("Close") {
+                    let close = dismiss
+                    close()
+                }
             }
         }
         """
