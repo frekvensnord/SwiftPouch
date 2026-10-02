@@ -78,7 +78,18 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     }
 
     public func lower(_ source: String) throws -> RuntimeViewNode {
-        try lower(parseSingleExpression(source))
+        let syntaxTree = try parseSyntaxTree(source)
+        guard syntaxTree.statements.count == 1,
+              let item = syntaxTree.statements.first?.item else {
+            throw RuntimeViewLoweringError.expectedSingleExpression
+        }
+        if let expression = item.as(ExprSyntax.self) {
+            return try lower(expression)
+        }
+        if let conditional = viewBuilderConditional(in: item) {
+            return try lowerConditional(conditional)
+        }
+        throw RuntimeViewLoweringError.expectedSingleExpression
     }
 
     func lowerRecordingActions(_ source: String) throws -> LoweredRuntimeView {
@@ -100,16 +111,16 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     }
 
     func dynamicStringExpressionSites(in source: String) throws -> [DynamicViewExpressionSite] {
-        let expression = try parseSingleExpression(source)
+        let syntaxTree = try parseSyntaxTree(source)
         let visitor = DynamicTextExpressionVisitor()
-        visitor.walk(expression)
+        visitor.walk(syntaxTree)
         return visitor.sites.sorted { $0.utf8Offset < $1.utf8Offset }
     }
 
     func dynamicBooleanConditions(in source: String) throws -> [String] {
-        let expression = try parseSingleExpression(source)
+        let syntaxTree = try parseSyntaxTree(source)
         let visitor = DynamicConditionExpressionVisitor()
-        visitor.walk(expression)
+        visitor.walk(syntaxTree)
         return visitor.expressions.sorted()
     }
 
@@ -118,22 +129,18 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     }
 
     func dynamicBooleanModifierArgumentSites(in source: String) throws -> [DynamicViewExpressionSite] {
-        let expression = try parseSingleExpression(source)
+        let syntaxTree = try parseSyntaxTree(source)
         let visitor = DynamicBooleanModifierExpressionVisitor()
-        visitor.walk(expression)
+        visitor.walk(syntaxTree)
         return visitor.sites.sorted { $0.utf8Offset < $1.utf8Offset }
     }
 
-    private func parseSingleExpression(_ source: String) throws -> ExprSyntax {
+    private func parseSyntaxTree(_ source: String) throws -> SourceFileSyntax {
         let syntaxTree = Parser.parse(source: source)
         guard !syntaxTree.hasError else {
             throw RuntimeViewLoweringError.malformedSyntax
         }
-        guard syntaxTree.statements.count == 1,
-              let expression = syntaxTree.statements.first?.item.as(ExprSyntax.self) else {
-            throw RuntimeViewLoweringError.expectedSingleExpression
-        }
-        return expression
+        return syntaxTree
     }
 
     private func lower(_ expression: ExprSyntax) throws -> RuntimeViewNode {
@@ -450,10 +457,13 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         _ statements: CodeBlockItemListSyntax
     ) throws -> RuntimeViewNode {
         let children = try statements.map { item -> RuntimeViewNode in
-            guard let expression = item.item.as(ExprSyntax.self) else {
-                throw RuntimeViewLoweringError.unsupportedExpression(item.trimmedDescription)
+            if let expression = item.item.as(ExprSyntax.self) {
+                return try lower(expression)
             }
-            return try lower(expression)
+            if let conditional = viewBuilderConditional(in: item.item) {
+                return try lowerConditional(conditional)
+            }
+            throw RuntimeViewLoweringError.unsupportedExpression(item.trimmedDescription)
         }
 
         switch children.count {

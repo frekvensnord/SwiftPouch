@@ -11,13 +11,12 @@ struct ViewConditionalSourceEditor {
         guard !syntaxTree.hasError else {
             throw RuntimeViewLoweringError.malformedSyntax
         }
-        guard syntaxTree.statements.count == 1,
-              let expression = syntaxTree.statements.first?.item.as(ExprSyntax.self) else {
+        guard syntaxTree.statements.count == 1 else {
             throw RuntimeViewLoweringError.expectedSingleExpression
         }
 
         let visitor = FirstConditionalVisitor()
-        visitor.walk(expression)
+        visitor.walk(syntaxTree)
         guard let conditional = visitor.conditional else { return nil }
         let bindings = try viewConditionalBindings(in: conditional.conditions)
         let simpleConditionExpression: String?
@@ -77,6 +76,12 @@ struct ViewConditionalSourceEditor {
         let contents = branchSource.trimmingCharacters(in: .whitespacesAndNewlines)
         return contents.isEmpty ? "EmptyView()" : "Group { \(contents) }"
     }
+}
+
+func viewBuilderConditional(in item: CodeBlockItemSyntax.Item) -> IfExprSyntax? {
+    let visitor = FirstConditionalVisitor()
+    visitor.walk(item._syntaxNode)
+    return visitor.conditional
 }
 
 func viewConditionalBindings(in conditions: ConditionElementListSyntax) throws -> [ViewConditionalBinding] {

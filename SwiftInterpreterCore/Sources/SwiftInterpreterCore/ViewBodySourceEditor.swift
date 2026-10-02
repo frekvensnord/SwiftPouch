@@ -64,8 +64,13 @@ struct ViewBodySourceEditor: Sendable {
                   let returnStatement = statement.item.as(ReturnStmtSyntax.self),
                   let returnedExpression = returnStatement.expression {
             expression = returnedExpression.trimmedDescription
+        } else if statements.count == 1, let statement = statements.first,
+                  viewBuilderConditional(in: statement.item) != nil {
+            expression = "Group {\n\(statement.trimmedDescription)\n}"
         } else {
-            guard statements.allSatisfy({ $0.item.as(ExprSyntax.self) != nil }) else {
+            guard statements.allSatisfy({
+                $0.item.as(ExprSyntax.self) != nil || viewBuilderConditional(in: $0.item) != nil
+            }) else {
                 throw RuntimeViewLoweringError.unsupportedExpression(
                     "struct \(typeName) body must contain view expressions"
                 )
