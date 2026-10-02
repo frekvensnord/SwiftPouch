@@ -99,7 +99,7 @@ final class SourceAnalysisTests: XCTestCase {
             @ObservedObject var observed: Model
             @Binding var title: String
             @Published var count = 0
-            @Environment(\\.dismiss) var dismiss
+            @Environment(\\.colorScheme) var colorScheme
         }
         """)
 
@@ -116,12 +116,13 @@ final class SourceAnalysisTests: XCTestCase {
         XCTAssertFalse(analysis.isReadyForEvaluation)
     }
 
-    func testScenePhaseEnvironmentIsPartialButDismissRemainsUnsupported() {
+    func testScenePhaseAndDismissEnvironmentArePartiallySupported() {
         let analysis = SourceAnalyzer().analyze("""
         import SwiftUI
         struct DemoView: View {
             @Environment(\\.scenePhase) private var scenePhase
             @Environment(\\.dismiss) private var dismiss
+            @Environment(\\.colorScheme) private var colorScheme
             var body: some View { Text("Ready") }
         }
         """)
@@ -129,8 +130,10 @@ final class SourceAnalysisTests: XCTestCase {
         let partialEnvironmentDiagnostics = analysis.diagnostics.filter {
             $0.code == .partiallySupportedPropertyWrapper
         }
-        XCTAssertEqual(partialEnvironmentDiagnostics.count, 1)
-        XCTAssertTrue(partialEnvironmentDiagnostics[0].message.contains("scenePhase"))
+        XCTAssertEqual(partialEnvironmentDiagnostics.count, 2)
+        XCTAssertTrue(partialEnvironmentDiagnostics.contains {
+            $0.message.contains("scenePhase") && $0.message.contains("dismiss")
+        })
 
         let unsupportedEnvironmentDiagnostics = analysis.diagnostics.filter {
             $0.code == .unsupportedPropertyWrapper

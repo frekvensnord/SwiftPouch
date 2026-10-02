@@ -11,6 +11,12 @@ struct ViewStateDeclaration: Sendable {
 struct ViewEnvironmentDeclaration: Sendable {
     let name: String
     let storageName: String
+    let key: ViewEnvironmentKey
+}
+
+enum ViewEnvironmentKey: Equatable, Sendable {
+    case scenePhase
+    case dismiss
 }
 
 struct ExtractedViewBody: Sendable {
@@ -130,9 +136,9 @@ struct ViewBodySourceEditor: Sendable {
             guard !environmentAttributes.isEmpty else { continue }
 
             guard environmentAttributes.count == 1,
-                  isScenePhaseEnvironment(environmentAttributes[0]) else {
+                  let key = supportedEnvironmentKey(environmentAttributes[0]) else {
                 throw RuntimeViewLoweringError.unsupportedExpression(
-                    "only @Environment(\\.scenePhase) is supported in \(typeName) during Step 28.1"
+                    "only @Environment(\\.scenePhase) and @Environment(\\.dismiss) are supported in \(typeName) during Step 28.2"
                 )
             }
             guard variable.bindingSpecifier.text == "var",
@@ -142,7 +148,7 @@ struct ViewBodySourceEditor: Sendable {
                   case nil = binding.initializer,
                   case nil = binding.accessorBlock else {
                 throw RuntimeViewLoweringError.unsupportedExpression(
-                    "@Environment(\\.scenePhase) in \(typeName) must be one stored mutable property"
+                    "@Environment(\\.\(environmentKeyName(key))) in \(typeName) must be one stored mutable property"
                 )
             }
 
@@ -154,20 +160,49 @@ struct ViewBodySourceEditor: Sendable {
             }
             declarations.append(ViewEnvironmentDeclaration(
                 name: name,
-                storageName: scenePhaseStorageName
+                storageName: environmentStorageName(for: key),
+                key: key
             ))
         }
         return declarations
     }
 
-    private func isScenePhaseEnvironment(_ attribute: AttributeSyntax) -> Bool {
+    private func supportedEnvironmentKey(_ attribute: AttributeSyntax) -> ViewEnvironmentKey? {
         let source = String(attribute.trimmedDescription.filter { !$0.isWhitespace })
-        return source == #"@Environment(\.scenePhase)"#
-            || source == #"@SwiftUI.Environment(\.scenePhase)"#
+        switch source {
+        case #"@Environment(\.scenePhase)"#, #"@SwiftUI.Environment(\.scenePhase)"#:
+            return .scenePhase
+        case #"@Environment(\.dismiss)"#, #"@SwiftUI.Environment(\.dismiss)"#:
+            return .dismiss
+        default:
+            return nil
+        }
     }
 
     private var scenePhaseStorageName: String {
         "__swiftpouch_environment_scenePhase"
+    }
+
+    private var dismissStorageName: String {
+        "__swiftpouch_environment_dismiss"
+    }
+
+    private func environmentStorageName(for key: ViewEnvironmentKey) -> String {
+        switch key {
+        case .scenePhase:
+            return scenePhaseStorageName
+        case .dismiss:
+            return dismissStorageName
+        }
+    }
+
+    private func environmentKeyName(_ key: ViewEnvironmentKey) -> String {
+        switch key {
+        case .scenePhase:
+            return "scenePhase"
+        case .dismiss:
+            return "dismiss"
+        }
     }
 
     private func viewStateDeclarations(
@@ -273,7 +308,8 @@ struct ViewBodySourceEditor: Sendable {
             in: expression,
             replacementsByName: replacementsByName,
             projectedReferencesAllowed: false,
-            propertyWrapperName: "@Environment"
+            propertyWrapperName: "@Environment",
+            directCallNames: Set(declarations.filter { $0.key == .dismiss }.map(\.name))
         )
         return try qualifyScenePhaseCases(in: rewritten)
     }
@@ -306,7 +342,8 @@ struct ViewBodySourceEditor: Sendable {
         in expression: String,
         replacementsByName: [String: String],
         projectedReferencesAllowed: Bool,
-        propertyWrapperName: String
+        propertyWrapperName: String,
+        directCallNames: Set<String> = []
     ) throws -> String {
         let syntaxTree = Parser.parse(source: expression)
         guard !syntaxTree.hasError else {
@@ -323,12 +360,18 @@ struct ViewBodySourceEditor: Sendable {
 
         let visitor = StateReferenceVisitor(
             replacementsByName: replacementsByName,
-            projectedReferencesAllowed: projectedReferencesAllowed
+            projectedReferencesAllowed: projectedReferencesAllowed,
+            directCallNames: directCallNames
         )
         visitor.walk(syntaxTree)
         if let projectedName = visitor.unsupportedProjectedPropertyName {
             throw RuntimeViewLoweringError.unsupportedExpression(
                 "\(propertyWrapperName) property \(projectedName) does not support projected access"
+            )
+        }
+        if let propertyName = visitor.unsupportedFunctionReferenceName {
+            throw RuntimeViewLoweringError.unsupportedExpression(
+                "\(propertyWrapperName) property \(propertyName) must be invoked directly as a function"
             )
         }
 
@@ -399,12 +442,19 @@ private final class StateLocalBindingVisitor: SyntaxVisitor {
 private final class StateReferenceVisitor: SyntaxVisitor {
     private let replacementsByName: [String: String]
     private let projectedReferencesAllowed: Bool
+    private let directCallNames: Set<String>
     private(set) var replacements: [StateReferenceReplacement] = []
     private(set) var unsupportedProjectedPropertyName: String?
+    private(set) var unsupportedFunctionReferenceName: String?
 
-    init(replacementsByName: [String: String], projectedReferencesAllowed: Bool) {
+    init(
+        replacementsByName: [String: String],
+        projectedReferencesAllowed: Bool,
+        directCallNames: Set<String>
+    ) {
         self.replacementsByName = replacementsByName
         self.projectedReferencesAllowed = projectedReferencesAllowed
+        self.directCallNames = directCallNames
         super.init(viewMode: .sourceAccurate)
     }
 
@@ -417,8 +467,16 @@ private final class StateReferenceVisitor: SyntaxVisitor {
             projectedPrefix = nil
         }
         let isProjection = rawName.hasPrefix("$") || projectedPrefix != nil
-        guard let replacement = replacementsByName[propertyName(from: rawName)],
-              !isFunctionName(node) else {
+        let propertyName = propertyName(from: rawName)
+        guard let replacement = replacementsByName[propertyName] else {
+            return .visitChildren
+        }
+        let isDirectCall = isFunctionName(node)
+        if isDirectCall && !directCallNames.contains(propertyName) {
+            return .visitChildren
+        }
+        if !isDirectCall && directCallNames.contains(propertyName) {
+            unsupportedFunctionReferenceName = propertyName
             return .visitChildren
         }
         if isProjection && !projectedReferencesAllowed {
@@ -439,15 +497,26 @@ private final class StateReferenceVisitor: SyntaxVisitor {
 
     override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
         guard let base = node.base?.as(DeclReferenceExprSyntax.self),
-              base.baseName.text == "self",
-              let replacement = replacementsByName[propertyName(from: node.declName.baseName.text)],
-              !isFunctionName(node) else {
+              base.baseName.text == "self" else {
             return .visitChildren
         }
-        let isProjection = node.declName.baseName.text.hasPrefix("$")
+        let rawPropertyName = node.declName.baseName.text
+        let propertyName = propertyName(from: rawPropertyName)
+        guard let replacement = replacementsByName[propertyName] else {
+            return .visitChildren
+        }
+        let isDirectCall = isFunctionName(node)
+        if isDirectCall && !directCallNames.contains(propertyName) {
+            return .visitChildren
+        }
+        if !isDirectCall && directCallNames.contains(propertyName) {
+            unsupportedFunctionReferenceName = propertyName
+            return .skipChildren
+        }
+        let isProjection = rawPropertyName.hasPrefix("$")
             || node.trimmedDescription.contains(".$")
         if isProjection && !projectedReferencesAllowed {
-            unsupportedProjectedPropertyName = propertyName(from: node.declName.baseName.text)
+            unsupportedProjectedPropertyName = propertyName
             return .skipChildren
         }
         replacements.append(StateReferenceReplacement(

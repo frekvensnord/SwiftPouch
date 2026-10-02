@@ -68,9 +68,12 @@ public struct InterpreterSourceFileControls: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("App: \(appViewSnapshot.entryPoint.appTypeName)")
                         .font(.headline)
-                    SwiftUIRuntimeRenderer(node: appViewSnapshot.rootView) { actionID in
-                        performAction(actionID, in: appViewSnapshot)
-                    }
+                    SwiftUIRuntimeRenderer(
+                        node: appViewSnapshot.rootView,
+                        onActionWithDismissal: { actionID in
+                            await performAction(actionID, in: appViewSnapshot)
+                        }
+                    )
                     .disabled(isWorking)
                 }
             }
@@ -149,24 +152,28 @@ public struct InterpreterSourceFileControls: View {
         await refreshPendingScenePhaseIfPossible()
     }
 
-    private func performAction(_ actionID: RuntimeActionID, in snapshot: InterpretedAppViewSnapshot) {
-        guard !isWorking else { return }
+    private func performAction(
+        _ actionID: RuntimeActionID,
+        in snapshot: InterpretedAppViewSnapshot
+    ) async -> Bool {
+        guard !isWorking else { return false }
         isWorking = true
         errorMessage = nil
 
-        Task {
-            do {
-                _ = try await kernel.performAction(actionID)
-                appViewSnapshot = try await kernel.refreshAppView(
-                    snapshot,
-                    scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
-                )
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-            isWorking = false
-            await refreshPendingScenePhaseIfPossible()
+        var requestsHostDismissal = false
+        do {
+            let result = try await kernel.performAction(actionID)
+            appViewSnapshot = try await kernel.refreshAppView(
+                snapshot,
+                scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
+            )
+            requestsHostDismissal = result.requestsHostDismissal
+        } catch {
+            errorMessage = error.localizedDescription
         }
+        isWorking = false
+        await refreshPendingScenePhaseIfPossible()
+        return requestsHostDismissal
     }
 
     private func unlinkFile() async {

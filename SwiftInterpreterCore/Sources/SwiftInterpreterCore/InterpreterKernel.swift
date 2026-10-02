@@ -22,10 +22,16 @@ private struct ScopedExpressionKey: Hashable {
 public struct EvaluationResult: Equatable, Sendable {
     public let value: String
     public let standardOutput: String
+    public let requestsHostDismissal: Bool
 
-    public init(value: String, standardOutput: String) {
+    public init(
+        value: String,
+        standardOutput: String,
+        requestsHostDismissal: Bool = false
+    ) {
         self.value = value
         self.standardOutput = standardOutput
+        self.requestsHostDismissal = requestsHostDismissal
     }
 }
 
@@ -74,6 +80,7 @@ public actor InterpreterKernel {
     private var registeredRuntimeActions: [RuntimeActionID: String] = [:]
     private var currentScenePhase: RuntimeScenePhase = .active
     private var interpreterScenePhase: RuntimeScenePhase?
+    private var interpreterDismissBridgeInstalled = false
     private var evaluationInProgress = false
     private var evaluationWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -357,7 +364,13 @@ public actor InterpreterKernel {
         guard !actionSource.isEmpty else {
             return EvaluationResult(value: "", standardOutput: "")
         }
-        return try await evaluateLocked(actionSource, resetInterpreter: false)
+        let result = try await evaluateLocked(actionSource, resetInterpreter: false)
+        let requestsHostDismissal = try await consumeHostDismissalRequest()
+        return EvaluationResult(
+            value: result.value,
+            standardOutput: result.standardOutput,
+            requestsHostDismissal: requestsHostDismissal
+        )
     }
 
     /// Starts a fresh interpreter session and clears its in-memory globals.
@@ -429,6 +442,7 @@ public actor InterpreterKernel {
         initializedViewStateOwners.removeAll()
         registeredRuntimeActions.removeAll()
         interpreterScenePhase = nil
+        interpreterDismissBridgeInstalled = false
     }
 
     private func updateInterpreterScenePhase(_ scenePhase: RuntimeScenePhase) async throws {
@@ -443,6 +457,10 @@ public actor InterpreterKernel {
                 case background
             }
             var __swiftpouch_environment_scenePhase: __SwiftPouchScenePhase = __SwiftPouchScenePhase.\(scenePhase.rawValue)
+            var __swiftpouch_host_dismiss_requested = false
+            func __swiftpouch_environment_dismiss() {
+                __swiftpouch_host_dismiss_requested = true
+            }
             """
         } else {
             source = "__swiftpouch_environment_scenePhase = __SwiftPouchScenePhase.\(scenePhase.rawValue)"
@@ -450,6 +468,23 @@ public actor InterpreterKernel {
 
         _ = try await evaluateLocked(source, resetInterpreter: false)
         interpreterScenePhase = scenePhase
+        interpreterDismissBridgeInstalled = true
+    }
+
+    private func consumeHostDismissalRequest() async throws -> Bool {
+        guard interpreterDismissBridgeInstalled else { return false }
+
+        let result = try await evaluateLocked(
+            "__swiftpouch_host_dismiss_requested",
+            resetInterpreter: false
+        )
+        guard result.value == "true" else { return false }
+
+        _ = try await evaluateLocked(
+            "__swiftpouch_host_dismiss_requested = false",
+            resetInterpreter: false
+        )
+        return true
     }
 
     private func seedViewStateDeclarations(

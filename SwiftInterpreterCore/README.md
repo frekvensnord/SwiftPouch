@@ -364,7 +364,7 @@ host launches for the linked source and workspace to reopen.
   warnings instead of unsupported-wrapper errors. The warnings still block
   whole-file evaluation because Reload & Run does not yet run the view-snapshot
   path. Other `@State` forms and `@StateObject`, `@ObservedObject`, `@Binding`,
-  `@Published`, and `@Environment` remain blocking errors.
+  `@Published`, and unsupported `@Environment` keys remain blocking errors.
 - Explicit `@ViewBuilder` declarations remain errors because the full-source
   evaluation path does not run those declaration bodies. The diagnostic now
   distinguishes them from the selected builder expressions supported by the
@@ -521,7 +521,15 @@ writable alias to the same cell. A child `@Binding` projection is retained
 when passed onward to another custom view. The supported initializers remain
 plain String and Bool literals; native controls, nested state-owning views,
 and dynamic repeated-view identity are later work. `@StateObject`,
-`@ObservedObject`, `@Published`, and `@Environment` remain later bridges.
+`@ObservedObject` and `@Published` remain later bridges. Step 28.1 routes the
+host's scene phase into interpreted bodies. Step 28.2 rewrites direct
+`@Environment(\.dismiss)` calls in interpreted actions into host-dismissal
+requests; `SwiftUIRuntimeRenderer` invokes the `DismissAction` from its own
+native SwiftUI environment after the action completes. Other environment keys
+and dismissal aliases are unsupported. Native sheet rendering is still a
+later step, where the target app's individual presentation flows can be tested
+end to end. Partial wrappers continue to block whole-source preflight even
+though the app-view path can lower their supported subset.
 Whole-source preflight still blocks these app-view wrappers because it does
 not run the specialized body-lowering path. Step 16 handles simple identifier
 let bindings in view-expression snapshots. Step 15 handles dynamic Boolean

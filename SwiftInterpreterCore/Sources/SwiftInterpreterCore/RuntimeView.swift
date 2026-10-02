@@ -252,6 +252,9 @@ public indirect enum RuntimeViewNode: Codable, Equatable, Sendable {
 public struct SwiftUIRuntimeRenderer: View {
     private let node: RuntimeViewNode
     private let onAction: @MainActor (RuntimeActionID) -> Void
+    private let onActionWithDismissal: (@MainActor @Sendable (RuntimeActionID) async -> Bool)?
+
+    @Environment(\.dismiss) private var hostDismissAction
 
     public init(
         node: RuntimeViewNode,
@@ -259,6 +262,20 @@ public struct SwiftUIRuntimeRenderer: View {
     ) {
         self.node = node
         self.onAction = onAction
+        self.onActionWithDismissal = nil
+    }
+
+    /// Renders actions that may request dismissal of the native presentation
+    /// containing this renderer. The dismissal action is read from this view's
+    /// SwiftUI environment so a renderer placed inside a sheet receives that
+    /// sheet's own host context.
+    public init(
+        node: RuntimeViewNode,
+        onActionWithDismissal: @escaping @MainActor @Sendable (RuntimeActionID) async -> Bool
+    ) {
+        self.node = node
+        self.onAction = { _ in }
+        self.onActionWithDismissal = onActionWithDismissal
     }
 
     @ViewBuilder
@@ -310,13 +327,13 @@ public struct SwiftUIRuntimeRenderer: View {
         case .button(let label, let actionID, let role):
             if let role {
                 Button(role: buttonRole(role)) {
-                    onAction(actionID)
+                    dispatchAction(actionID)
                 } label: {
                     render(label)
                 }
             } else {
                 Button {
-                    onAction(actionID)
+                    dispatchAction(actionID)
                 } label: {
                     render(label)
                 }
@@ -325,6 +342,20 @@ public struct SwiftUIRuntimeRenderer: View {
             Spacer(minLength: minLength.map { CGFloat($0) })
         case .divider:
             Divider()
+        }
+    }
+
+    private func dispatchAction(_ actionID: RuntimeActionID) {
+        guard let onActionWithDismissal else {
+            onAction(actionID)
+            return
+        }
+
+        let dismissAction = hostDismissAction
+        Task { @MainActor in
+            if await onActionWithDismissal(actionID) {
+                dismissAction()
+            }
         }
     }
 

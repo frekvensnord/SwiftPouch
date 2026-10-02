@@ -138,7 +138,7 @@ public struct SourceAnalyzer: Sendable {
                     case "Binding":
                         message = "@Binding supports direct projected @State or @Binding values passed to custom views and expanded as writable aliases in the app-view path; other binding expressions remain unsupported."
                     case "Environment":
-                        message = "@Environment(\\.scenePhase) is connected to the host scene lifecycle in the app-view path; other environment values remain unsupported."
+                        message = "@Environment(\\.scenePhase) is connected to the host scene lifecycle, and @Environment(\\.dismiss) can request dismissal from the native host presentation in the app-view path; other environment values remain unsupported."
                     default:
                         message = "Property wrapper '@\(feature.attributeName)' is supported only by its registered app-view runtime path."
                     }
@@ -286,7 +286,7 @@ private final class RuntimeRequirementVisitor: SyntaxVisitor {
             } else if attributeName == "Binding", hasSupportedBindingProperty(node) {
                 support = .partial
             } else if attributeName == "Environment",
-                      hasSupportedScenePhaseEnvironment(attribute, in: node) {
+                      hasSupportedHostEnvironment(attribute, in: node) {
                 support = .partial
             } else {
                 support = .unsupported
@@ -347,13 +347,15 @@ private final class RuntimeRequirementVisitor: SyntaxVisitor {
         return wrapperNames == ["Binding"]
     }
 
-    private func hasSupportedScenePhaseEnvironment(
+    private func hasSupportedHostEnvironment(
         _ attribute: AttributeSyntax,
         in declaration: VariableDeclSyntax
     ) -> Bool {
         let attributeSource = String(attribute.trimmedDescription.filter { !$0.isWhitespace })
         guard attributeSource == #"@Environment(\.scenePhase)"#
-                || attributeSource == #"@SwiftUI.Environment(\.scenePhase)"#,
+                || attributeSource == #"@SwiftUI.Environment(\.scenePhase)"#
+                || attributeSource == #"@Environment(\.dismiss)"#
+                || attributeSource == #"@SwiftUI.Environment(\.dismiss)"#,
               declaration.bindingSpecifier.text == "var",
               declaration.bindings.count == 1,
               let binding = declaration.bindings.first,

@@ -1394,6 +1394,89 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(textValues(in: background), ["Child inactive"])
     }
 
+    func testDismissEnvironmentButtonReturnsHostDismissalRequest() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct DismissView: View {
+            @Environment(\\.dismiss) private var dismiss
+
+            var body: some View {
+                HStack {
+                    Button("Close") { dismiss() }
+                    Button("Stay") { print("staying") }
+                }
+            }
+        }
+        """
+
+        let view = try await kernel.lowerViewBody(in: source, typeName: "DismissView")
+        guard case .horizontalStack(_, _, let children) = view,
+              children.count == 2,
+              case .button(_, let closeActionID, _) = children[0],
+              case .button(_, let stayActionID, _) = children[1] else {
+            return XCTFail("Expected Close and Stay buttons in the lowered view")
+        }
+
+        let closeResult = try await kernel.performAction(closeActionID)
+        XCTAssertTrue(closeResult.requestsHostDismissal)
+
+        let stayResult = try await kernel.performAction(stayActionID)
+        XCTAssertFalse(stayResult.requestsHostDismissal)
+        XCTAssertEqual(stayResult.standardOutput, "staying\n")
+
+        let secondCloseResult = try await kernel.performAction(closeActionID)
+        XCTAssertTrue(secondCloseResult.requestsHostDismissal)
+    }
+
+    func testCustomViewDismissEnvironmentInheritsHostContext() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct ParentView: View {
+            var body: some View { DismissChildView() }
+        }
+
+        struct DismissChildView: View {
+            @Environment(\\.dismiss) private var dismiss
+
+            var body: some View {
+                Button("Close child") { self.dismiss() }
+            }
+        }
+        """
+
+        let view = try await kernel.lowerViewBody(in: source, typeName: "ParentView")
+        guard case .button(_, let actionID, _) = view else {
+            return XCTFail("Expected the custom child to lower as a button")
+        }
+
+        let result = try await kernel.performAction(actionID)
+        XCTAssertTrue(result.requestsHostDismissal)
+    }
+
+    func testDismissEnvironmentMustBeInvokedDirectly() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct DismissAliasView: View {
+            @Environment(\\.dismiss) private var dismiss
+
+            var body: some View {
+                let close = dismiss
+                Button("Close") { close() }
+            }
+        }
+        """
+
+        do {
+            _ = try await kernel.lowerViewBody(in: source, typeName: "DismissAliasView")
+            XCTFail("Only direct dismiss() calls are connected to the native host action")
+        } catch let error as RuntimeViewLoweringError {
+            guard case .unsupportedExpression(let detail) = error else {
+                return XCTFail("Expected a clear unsupported-expression diagnostic")
+            }
+            XCTAssertTrue(detail.contains("must be invoked directly"))
+        }
+    }
+
     private func textValues(in node: RuntimeViewNode) -> [String] {
         switch node {
         case .text(let value):
