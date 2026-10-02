@@ -362,7 +362,7 @@ public actor InterpreterKernel {
         )
 
         do {
-            let value = try await shell.withCurrent {
+            let value = try await shell.withCurrent { @Sendable in
                 try await self.evaluateSource(source)
             }
             output.finish()
@@ -434,7 +434,7 @@ public actor InterpreterKernel {
         )
 
         do {
-            try await shell.withCurrent {
+            try await shell.withCurrent { @Sendable in
                 for declaration in pending {
                     try await self.seedViewStateDeclaration(declaration, typeName: typeName)
                 }
@@ -472,7 +472,7 @@ public actor InterpreterKernel {
         )
 
         do {
-            let resolvedSource = try await shell.withCurrent {
+            let resolvedSource = try await shell.withCurrent { @Sendable in
                 try await self.resolveViewConditionalBranchesInCurrentShell(source)
             }
             output.finish()
@@ -572,7 +572,7 @@ public actor InterpreterKernel {
         )
 
         do {
-            let values = try await shell.withCurrent {
+            let values = try await shell.withCurrent { @Sendable in
                 try await self.evaluateDynamicTextExpressions(sites, bindingScopes: bindingScopes)
             }
             output.finish()
@@ -602,7 +602,7 @@ public actor InterpreterKernel {
         )
 
         do {
-            let values = try await shell.withCurrent {
+            let values = try await shell.withCurrent { @Sendable in
                 try await self.evaluateDynamicBooleanModifierArguments(
                     sites,
                     bindingScopes: bindingScopes
