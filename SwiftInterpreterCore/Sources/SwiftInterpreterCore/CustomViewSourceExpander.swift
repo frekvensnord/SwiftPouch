@@ -2,8 +2,8 @@ import SwiftParser
 import SwiftSyntax
 
 /// Expands simple top-level custom `View` calls before view-expression lowering.
-/// Only synthesized memberwise initializers for immutable, unwrapped stored
-/// properties are modeled in this step.
+/// Synthesized memberwise initializers support immutable inputs and direct
+/// projections of parent `@State` cells into child `@Binding` properties.
 struct CustomViewSourceExpander: Sendable {
     private let bodySourceEditor = ViewBodySourceEditor()
 
@@ -158,7 +158,7 @@ struct CustomViewSourceExpander: Sendable {
             )
         }
 
-        var parameters: [String] = []
+        var inputs: [CustomViewInput] = []
         for member in declaration.memberBlock.members {
             if let variable = member.decl.as(VariableDeclSyntax.self) {
                 let isBody = variable.bindings.contains { binding in
@@ -168,6 +168,38 @@ struct CustomViewSourceExpander: Sendable {
                     guard variable.bindings.count == 1 else {
                         throw unsupportedCustomView(name, "body must be declared on its own")
                     }
+                    continue
+                }
+
+                let wrapperNames = variable.attributes.compactMap { element -> String? in
+                    guard case .attribute(let attribute) = element else { return nil }
+                    return attribute.attributeName.trimmedDescription
+                        .split(separator: ".")
+                        .last
+                        .map(String.init)
+                }
+                if wrapperNames.contains("Binding") {
+                    let hasUnsupportedModifier = variable.modifiers.contains { modifier in
+                        !["private", "fileprivate", "internal", "public"].contains(modifier.name.text)
+                    }
+                    guard wrapperNames == ["Binding"],
+                          variable.bindingSpecifier.text == "var",
+                          !hasUnsupportedModifier,
+                          variable.bindings.count == 1,
+                          let binding = variable.bindings.first,
+                          let identifier = binding.pattern.as(IdentifierPatternSyntax.self),
+                          case nil = binding.initializer,
+                          case nil = binding.accessorBlock,
+                          binding.typeAnnotation != nil else {
+                        throw unsupportedCustomView(
+                            name,
+                            "@Binding inputs must be one mutable, typed stored property without a default"
+                        )
+                    }
+                    inputs.append(CustomViewInput(
+                        name: identifier.identifier.text,
+                        kind: .binding
+                    ))
                     continue
                 }
 
@@ -186,7 +218,7 @@ struct CustomViewSourceExpander: Sendable {
                         "stored inputs must be simple immutable let properties without wrappers or defaults"
                     )
                 }
-                parameters.append(identifier.identifier.text)
+                inputs.append(CustomViewInput(name: identifier.identifier.text, kind: .value))
             } else {
                 throw unsupportedCustomView(
                     name,
@@ -195,7 +227,7 @@ struct CustomViewSourceExpander: Sendable {
             }
         }
 
-        return CustomViewDefinition(parameters: parameters, body: extractedBody.expression)
+        return CustomViewDefinition(inputs: inputs, body: extractedBody.expression)
     }
 
     private func argumentValues(
@@ -204,23 +236,44 @@ struct CustomViewSourceExpander: Sendable {
     ) throws -> [String: String] {
         guard call.trailingClosure == nil,
               call.additionalTrailingClosures.isEmpty,
-              call.arguments.count == definition.parameters.count else {
+              call.arguments.count == definition.inputs.count else {
             throw RuntimeViewLoweringError.unsupportedArgument(
                 "custom view requires all declared inputs as labeled arguments"
             )
         }
 
         var values: [String: String] = [:]
-        for (argument, parameter) in zip(call.arguments, definition.parameters) {
-            guard argument.label?.text == parameter,
+        for (argument, input) in zip(call.arguments, definition.inputs) {
+            guard argument.label?.text == input.name,
                   argument.expression.as(ClosureExprSyntax.self) == nil else {
                 throw RuntimeViewLoweringError.unsupportedArgument(
-                    "custom view input \(parameter) must be a labeled non-closure expression"
+                    "custom view input \(input.name) must be a labeled non-closure expression"
                 )
             }
-            values[parameter] = argument.expression.trimmedDescription
+            let expression = argument.expression.trimmedDescription
+            if input.kind == .binding {
+                guard let projectedName = projectedBindingName(expression) else {
+                    throw RuntimeViewLoweringError.unsupportedArgument(
+                        "custom view @Binding input \(input.name) must receive a direct $state projection"
+                    )
+                }
+                values[input.name] = projectedName
+            } else {
+                values[input.name] = expression
+            }
         }
         return values
+    }
+
+    private func projectedBindingName(_ expression: String) -> String? {
+        guard expression.first == "$" else { return nil }
+        let identifier = String(expression.dropFirst())
+        guard let first = identifier.first,
+              first == "_" || first.isLetter,
+              identifier.dropFirst().allSatisfy({ $0 == "_" || $0.isLetter || $0.isNumber }) else {
+            return nil
+        }
+        return identifier
     }
 
     private func substituting(_ values: [String: String], into body: String) throws -> String {
@@ -269,8 +322,18 @@ struct CustomViewSourceExpander: Sendable {
 }
 
 private struct CustomViewDefinition {
-    let parameters: [String]
+    let inputs: [CustomViewInput]
     let body: String
+}
+
+private struct CustomViewInput {
+    let name: String
+    let kind: Kind
+
+    enum Kind: Equatable {
+        case value
+        case binding
+    }
 }
 
 private struct CustomViewCall {
@@ -334,6 +397,31 @@ private final class StoredPropertyReferenceVisitor: SyntaxVisitor {
             )
         )
         return .visitChildren
+    }
+
+    override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
+        guard let base = node.base?.as(DeclReferenceExprSyntax.self),
+              base.baseName.text == "self" else {
+            return .visitChildren
+        }
+
+        let start = node.positionAfterSkippingLeadingTrivia.utf8Offset
+        let end = node.endPositionBeforeTrailingTrivia.utf8Offset
+        let isFunctionName: Bool
+        if let call = node.parent?.as(FunctionCallExprSyntax.self) {
+            isFunctionName = call.calledExpression.positionAfterSkippingLeadingTrivia.utf8Offset == start
+                && call.calledExpression.endPositionBeforeTrailingTrivia.utf8Offset == end
+        } else {
+            isFunctionName = false
+        }
+
+        references.append(StoredPropertyReference(
+            name: node.declName.baseName.text,
+            start: start,
+            end: end,
+            isFunctionName: isFunctionName
+        ))
+        return .skipChildren
     }
 }
 

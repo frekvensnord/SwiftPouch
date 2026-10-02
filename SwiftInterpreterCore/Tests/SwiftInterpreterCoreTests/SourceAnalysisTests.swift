@@ -74,7 +74,7 @@ final class SourceAnalysisTests: XCTestCase {
 
         XCTAssertFalse(analysis.isReadyForEvaluation)
         let error = SourcePreflightError(analysis: analysis)
-        XCTAssertTrue(error.localizedDescription.contains("current snapshot subset"))
+        XCTAssertTrue(error.localizedDescription.contains("plain String or Bool literal"))
     }
 
     func testUnsupportedStateDefaultRemainsAnError() {
@@ -106,8 +106,26 @@ final class SourceAnalysisTests: XCTestCase {
         let wrapperErrors = analysis.diagnostics.filter {
             $0.code == .unsupportedPropertyWrapper
         }
-        XCTAssertEqual(wrapperErrors.count, 5)
+        XCTAssertEqual(wrapperErrors.count, 4)
         XCTAssertTrue(wrapperErrors.allSatisfy { $0.severity == .error })
+        let bindingDiagnostics = analysis.diagnostics.filter {
+            $0.code == .partiallySupportedPropertyWrapper
+        }
+        XCTAssertEqual(bindingDiagnostics.count, 1)
+        XCTAssertTrue(bindingDiagnostics[0].message.contains("writable alias"))
+        XCTAssertFalse(analysis.isReadyForEvaluation)
+    }
+
+    func testBindingWithoutSimpleStoredValueShapeRemainsUnsupported() {
+        let analysis = SourceAnalyzer().analyze("""
+        struct ChildView {
+            @Binding var title: String = "local"
+        }
+        """)
+
+        XCTAssertTrue(analysis.diagnostics.contains {
+            $0.code == .unsupportedPropertyWrapper && $0.message.contains("@Binding")
+        })
         XCTAssertFalse(analysis.isReadyForEvaluation)
     }
 

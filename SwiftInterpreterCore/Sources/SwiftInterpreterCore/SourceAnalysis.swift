@@ -131,10 +131,19 @@ public struct SourceAnalyzer: Sendable {
             switch feature.feature {
             case .propertyWrappers:
                 if feature.support == .partial {
+                    let message: String
+                    switch feature.attributeName {
+                    case "State":
+                        message = "@State supports plain String or Bool literal defaults as persistent mutable cells in the app-view path; whole-source evaluation still requires that specialized path."
+                    case "Binding":
+                        message = "@Binding supports a direct projected @State value passed to a custom view and expanded as a writable alias in the app-view path; other binding expressions remain unsupported."
+                    default:
+                        message = "Property wrapper '@\(feature.attributeName)' is supported only by its registered app-view runtime path."
+                    }
                     diagnostic = SourceDiagnostic(
                         code: .partiallySupportedPropertyWrapper,
                         severity: .warning,
-                        message: "@State matches the current snapshot subset: a mutable property with a plain String or Bool literal default. Per-view storage and reactive updates are not implemented yet.",
+                        message: message,
                         location: feature.location
                     )
                 } else {
@@ -269,9 +278,14 @@ private final class RuntimeRequirementVisitor: SyntaxVisitor {
             let attributeName = fullName.split(separator: ".").last.map(String.init) ?? fullName
             guard wrapperNames.contains(attributeName) else { continue }
 
-            let support: FeatureSupportLevel = attributeName == "State" && hasSupportedStateDefault(node)
-                ? .partial
-                : .unsupported
+            let support: FeatureSupportLevel
+            if attributeName == "State", hasSupportedStateDefault(node) {
+                support = .partial
+            } else if attributeName == "Binding", hasSupportedBindingProperty(node) {
+                support = .partial
+            } else {
+                support = .unsupported
+            }
             features.append(FeatureOccurrence(
                 feature: .propertyWrappers,
                 attributeName: attributeName,
@@ -306,6 +320,26 @@ private final class RuntimeRequirementVisitor: SyntaxVisitor {
             }
             return isPlainStringOrBooleanLiteral(initializer)
         }
+    }
+
+    private func hasSupportedBindingProperty(_ declaration: VariableDeclSyntax) -> Bool {
+        guard declaration.bindingSpecifier.text == "var",
+              declaration.bindings.count == 1,
+              let binding = declaration.bindings.first,
+              binding.pattern.as(IdentifierPatternSyntax.self) != nil,
+              binding.typeAnnotation != nil,
+              case nil = binding.initializer,
+              case nil = binding.accessorBlock else {
+            return false
+        }
+        let wrapperNames = declaration.attributes.compactMap { element -> String? in
+            guard case .attribute(let attribute) = element else { return nil }
+            return attribute.attributeName.trimmedDescription
+                .split(separator: ".")
+                .last
+                .map(String.init)
+        }
+        return wrapperNames == ["Binding"]
     }
 
     private func isPlainStringOrBooleanLiteral(_ expression: ExprSyntax) -> Bool {

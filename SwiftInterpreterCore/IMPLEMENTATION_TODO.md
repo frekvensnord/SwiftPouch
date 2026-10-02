@@ -42,12 +42,24 @@ The physical-device reload smoke test is tracked separately from this CI gate.
 
 ## Step 27 — Implement `@State` and `@Binding`
 
-Replace the current String/Bool snapshot initialization with mutable state
-cells that have stable view identity. Connect bindings to readable and
-writable state, including projected values such as `$draft`.
+Replace the former String/Bool snapshot defaults with persistent mutable
+interpreter cells. Give each cell a deterministic identity derived from its
+owning view type and property, so same-named properties in different view
+types remain independent across body refreshes. Rewrite reads, writes, and
+projected references to the owning cell. Expand a simple custom-view
+`@Binding var value: T` passed directly as `$state`, so child reads and writes
+use the exact parent cell. Keep native input rendering for the controls step.
 
-**Done when:** user input and actions read and mutate the same state values
-used by the next view rebuild.
+The current supported initializer subset is a plain String or Bool literal.
+The binding subset is one typed stored `@Binding` property receiving a direct
+`$identifier` projection during custom-view expansion. State owned by nested
+or dynamically repeated view instances, nonliteral defaults, and native
+`Binding` controls remain outside this step.
+
+**Done when:** repeated body lowering preserves a cell's current value,
+same-named state in different view types is isolated, a binding-backed child
+can both read and write its parent's cell, a subsequent body lowering shows
+that write, and interpreter reset restores each literal default.
 
 ## Step 28 — Connect observable objects and published changes
 
