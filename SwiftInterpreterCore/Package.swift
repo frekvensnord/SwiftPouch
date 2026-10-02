@@ -37,6 +37,10 @@ let package = Package(
                     package: "SwiftScript"
                 ),
                 .product(
+                    name: "SwiftScriptAST",
+                    package: "SwiftScript"
+                ),
+                .product(
                     name: "ShellKit",
                     package: "ShellKit"
                 ),

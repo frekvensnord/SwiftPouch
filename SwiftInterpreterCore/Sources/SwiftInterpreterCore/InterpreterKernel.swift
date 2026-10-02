@@ -64,7 +64,9 @@ public actor InterpreterKernel {
     private let viewBodySourceEditor: ViewBodySourceEditor
     private let customViewSourceExpander: CustomViewSourceExpander
     private let appEntryPointSourceExtractor: AppEntryPointSourceExtractor
+    private let scriptSourceAdapter: SwiftScriptSourceAdapter
     private var interpreter = Interpreter()
+    private var optionalVariableTypes: [String: String] = [:]
     private var initializedViewStateOwners: [String: String] = [:]
     private var registeredRuntimeActions: [RuntimeActionID: String] = [:]
     private var evaluationInProgress = false
@@ -79,6 +81,7 @@ public actor InterpreterKernel {
         self.viewBodySourceEditor = ViewBodySourceEditor()
         self.customViewSourceExpander = CustomViewSourceExpander()
         self.appEntryPointSourceExtractor = AppEntryPointSourceExtractor()
+        self.scriptSourceAdapter = SwiftScriptSourceAdapter()
     }
 
     /// Reports imports, known runtime requirements, and source diagnostics.
@@ -394,12 +397,15 @@ public actor InterpreterKernel {
     }
 
     private func evaluateSource(_ source: String) async throws -> String {
-        let value = try await interpreter.eval(source)
+        let prepared = scriptSourceAdapter.prepare(source, optionalVariableTypes: optionalVariableTypes)
+        let value = try await interpreter.eval(prepared.source)
+        optionalVariableTypes = prepared.optionalVariableTypes
         return String(describing: value)
     }
 
     private func resetInterpreterScope() {
         interpreter = Interpreter()
+        optionalVariableTypes.removeAll()
         initializedViewStateOwners.removeAll()
         registeredRuntimeActions.removeAll()
     }
@@ -540,7 +546,13 @@ public actor InterpreterKernel {
         _ conditional: ViewConditionalSite,
         activeBindings: [ViewConditionalBinding]
     ) async throws -> Bool {
-        let conditionExpression = "if \(conditional.conditionSource) { true } else { false }"
+        let conditionExpression: String
+        if let directExpression = conditional.conditionExpression,
+           activeBindings.isEmpty {
+            conditionExpression = directExpression
+        } else {
+            conditionExpression = "if \(conditional.conditionSource) { true } else { false }"
+        }
         let scopedExpression = expressionWithOptionalBindings(
             conditionExpression,
             fallback: "false",
