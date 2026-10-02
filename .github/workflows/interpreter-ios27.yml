@@ -1,0 +1,96 @@
+name: Interpreter iOS 27 CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Xcode 27 / Swift 6.4
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      CI_LOG_DIR: ${{ runner.temp }}/interpreter-ci-logs
+      CI_DERIVED_DATA: ${{ runner.temp }}/interpreter-derived-data
+
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v7
+
+      - name: Select and verify Xcode 27 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo xcode-select --switch /Applications/Xcode_27.0.app/Contents/Developer
+          mkdir -p "$CI_LOG_DIR"
+
+          {
+            xcode-select -p
+            xcodebuild -version
+            swift --version
+            printf 'iOS SDK: '
+            xcrun --sdk iphoneos --show-sdk-version
+          } | tee "$CI_LOG_DIR/toolchain.txt"
+
+          xcodebuild -version | grep -Eq '^Xcode 27\.'
+          swift --version | grep -Eq 'Apple Swift version 6\.4([ .]|$)'
+          xcrun --sdk iphoneos --show-sdk-version | grep -Eq '^27\.'
+
+      - name: Resolve Swift package dependencies
+        working-directory: SwiftInterpreterCore
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift package resolve 2>&1 | tee "$CI_LOG_DIR/swift-package-resolve.log"
+          swift package show-dependencies --format json \
+            > "$CI_LOG_DIR/swift-package-dependencies.json"
+
+      - name: Run core tests
+        working-directory: SwiftInterpreterCore
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test 2>&1 | tee "$CI_LOG_DIR/swift-test.log"
+
+      - name: Resolve host project dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project SwiftInterpreterHost/SwiftInterpreterHost.xcodeproj \
+            -scheme SwiftInterpreterHost \
+            -resolvePackageDependencies \
+            2>&1 | tee "$CI_LOG_DIR/xcode-resolve.log"
+
+      - name: Build iOS host for device SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project SwiftInterpreterHost/SwiftInterpreterHost.xcodeproj \
+            -scheme SwiftInterpreterHost \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$CI_DERIVED_DATA" \
+            CODE_SIGNING_ALLOWED=NO \
+            build \
+            2>&1 | tee "$CI_LOG_DIR/ios-host-build.log"
+
+          test -d "$CI_DERIVED_DATA/Build/Products/Debug-iphoneos/SwiftInterpreterHost.app"
+
+      - name: Upload toolchain, dependency locks, logs, and unsigned host build
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: interpreter-ios27-ci-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/interpreter-ci-logs/
+            SwiftInterpreterCore/Package.resolved
+            SwiftInterpreterHost/SwiftInterpreterHost.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+            ${{ runner.temp }}/interpreter-derived-data/Build/Products/Debug-iphoneos/SwiftInterpreterHost.app/
