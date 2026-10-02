@@ -49,8 +49,10 @@ struct SwiftScriptSourceAdapter: Sendable {
             let temporaryName = "__swiftpouchOptionalAssignment\(edits.count)"
             let replacement = "({ let \(temporaryName): \(optionalType) = \(rightSide.trimmedDescription); \(temporaryName) })()"
             edits.append((
-                range: rightSide.positionAfterSkippingLeadingTrivia.utf8Offset
-                    ..<rightSide.endPositionBeforeTrailingTrivia.utf8Offset,
+                range: (
+                    rightSide.positionAfterSkippingLeadingTrivia.utf8Offset
+                        ..< rightSide.endPositionBeforeTrailingTrivia.utf8Offset
+                ),
                 replacement: replacement
             ))
         }

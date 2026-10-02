@@ -64,6 +64,8 @@ jobs:
           swift test 2>&1 | tee "$CI_LOG_DIR/swift-test.log"
 
       - name: Resolve host project dependencies
+        id: host_resolve
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -74,6 +76,7 @@ jobs:
             2>&1 | tee "$CI_LOG_DIR/xcode-resolve.log"
 
       - name: Build iOS host for device SDK
+        if: ${{ !cancelled() && steps.host_resolve.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
