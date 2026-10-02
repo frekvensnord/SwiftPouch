@@ -11,15 +11,20 @@ permissions:
 jobs:
   validate:
     name: Xcode 27 / Swift 6.4
-    runs-on: xcode-27
+    runs-on: xcode-27-arm64
     timeout-minutes: 90
-    env:
-      CI_LOG_DIR: ${{ runner.temp }}/interpreter-ci-logs
-      CI_DERIVED_DATA: ${{ runner.temp }}/interpreter-derived-data
 
     steps:
       - name: Check out project
         uses: actions/checkout@v7
+
+      - name: Prepare CI paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'CI_LOG_DIR=%s\n' "$RUNNER_TEMP/interpreter-ci-logs" >> "$GITHUB_ENV"
+          printf 'CI_DERIVED_DATA=%s\n' "$RUNNER_TEMP/interpreter-derived-data" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/interpreter-ci-logs"
 
       - name: Select and verify Xcode 27 toolchain
         shell: bash
@@ -27,19 +32,20 @@ jobs:
           set -euo pipefail
 
           sudo xcode-select --switch /Applications/Xcode_27.0.app/Contents/Developer
-          mkdir -p "$CI_LOG_DIR"
+          XCODE_INFO="$(xcodebuild -version)"
+          SWIFT_INFO="$(swift --version)"
+          IOS_SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
 
           {
             xcode-select -p
-            xcodebuild -version
-            swift --version
-            printf 'iOS SDK: '
-            xcrun --sdk iphoneos --show-sdk-version
+            printf '%s\n' "$XCODE_INFO"
+            printf '%s\n' "$SWIFT_INFO"
+            printf 'iOS SDK: %s\n' "$IOS_SDK_VERSION"
           } | tee "$CI_LOG_DIR/toolchain.txt"
 
-          xcodebuild -version | grep -Eq '^Xcode 27\.'
-          swift --version | grep -Eq 'Apple Swift version 6\.4([ .]|$)'
-          xcrun --sdk iphoneos --show-sdk-version | grep -Eq '^27\.'
+          grep -Eq '^Xcode 27\.' <<< "$XCODE_INFO"
+          grep -Eq 'Apple Swift version 6\.4([ .]|$)' <<< "$SWIFT_INFO"
+          grep -Eq '^27\.' <<< "$IOS_SDK_VERSION"
 
       - name: Resolve Swift package dependencies
         working-directory: SwiftInterpreterCore
