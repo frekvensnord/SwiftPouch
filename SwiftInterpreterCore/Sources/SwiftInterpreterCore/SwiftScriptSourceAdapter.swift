@@ -23,10 +23,22 @@ struct SwiftScriptSourceAdapter: Sendable {
         var edits: [(range: Range<Int>, replacement: String)] = []
         var classes: [String: ClassDeclSyntax] = [:]
         var enumVariableTypes: [String: String] = [:]
+        var enumCaseOwners: [String: String] = [:]
+        var ambiguousEnumCases: Set<String> = []
 
         for statement in parsed.sourceFile.statements {
             if let declaration = statement.item.as(DeclSyntax.self)?.as(ClassDeclSyntax.self) {
                 classes[declaration.name.text] = declaration
+            }
+            if let declaration = statement.item.as(DeclSyntax.self)?.as(EnumDeclSyntax.self) {
+                for member in declaration.memberBlock.members {
+                    guard let cases = member.decl.as(EnumCaseDeclSyntax.self) else { continue }
+                    for element in cases.elements {
+                        let caseName = element.name.text
+                        if enumCaseOwners[caseName] != nil { ambiguousEnumCases.insert(caseName) }
+                        enumCaseOwners[caseName] = declaration.name.text
+                    }
+                }
             }
             if let declaration = statement.item.as(DeclSyntax.self)?.as(VariableDeclSyntax.self) {
                 for binding in declaration.bindings {
@@ -110,7 +122,11 @@ struct SwiftScriptSourceAdapter: Sendable {
             }
         }
 
-        let visitor = CompatibilityExpressionVisitor(enumVariableTypes: enumVariableTypes)
+        for name in ambiguousEnumCases { enumCaseOwners.removeValue(forKey: name) }
+        let visitor = CompatibilityExpressionVisitor(
+            enumVariableTypes: enumVariableTypes,
+            enumCaseOwners: enumCaseOwners
+        )
         visitor.walk(parsed.sourceFile)
         edits.append(contentsOf: visitor.edits)
 
@@ -131,10 +147,12 @@ struct SwiftScriptSourceAdapter: Sendable {
 
 private final class CompatibilityExpressionVisitor: SyntaxVisitor {
     let enumVariableTypes: [String: String]
+    let enumCaseOwners: [String: String]
     private(set) var edits: [(range: Range<Int>, replacement: String)] = []
 
-    init(enumVariableTypes: [String: String]) {
+    init(enumVariableTypes: [String: String], enumCaseOwners: [String: String]) {
         self.enumVariableTypes = enumVariableTypes
+        self.enumCaseOwners = enumCaseOwners
         super.init(viewMode: .sourceAccurate)
     }
 
@@ -156,6 +174,39 @@ private final class CompatibilityExpressionVisitor: SyntaxVisitor {
 
         let insertion = member.positionAfterSkippingLeadingTrivia.utf8Offset
         edits.append((range: insertion..<insertion, replacement: enumType))
+        return .visitChildren
+    }
+
+    override func visit(_ node: OptionalBindingConditionSyntax) -> SyntaxVisitorContinueKind {
+        guard let expression = node.initializer?.value,
+              expression.trimmedDescription.contains("??"),
+              expression.trimmedDescription.contains("as? String") else { return .visitChildren }
+
+        // SwiftScript's nil-coalescing operator currently unwraps a present
+        // left side even when the right side is Optional. Restore the
+        // Optional required by `guard let` using the source's cast type.
+        edits.append((
+            range: expression.positionAfterSkippingLeadingTrivia.utf8Offset
+                ..< expression.endPositionBeforeTrailingTrivia.utf8Offset,
+            replacement: "(\(expression.trimmedDescription)) as? String"
+        ))
+        return .skipChildren
+    }
+
+    override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
+        let caseName = node.declName.baseName.text
+        guard node.base == nil, let owner = enumCaseOwners[caseName] else { return .visitChildren }
+        var ancestor = node.parent
+        while let current = ancestor {
+            if let call = current.as(FunctionCallExprSyntax.self),
+               call.calledExpression.trimmedDescription == ".failure" {
+                let insertion = node.positionAfterSkippingLeadingTrivia.utf8Offset
+                edits.append((range: insertion..<insertion, replacement: owner))
+                break
+            }
+            if current.is(CodeBlockItemSyntax.self) { break }
+            ancestor = current.parent
+        }
         return .visitChildren
     }
 }

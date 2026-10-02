@@ -15,17 +15,14 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(
-            url: "https://github.com/Cocoanetics/SwiftScript.git",
-            branch: "main"
-        ),
+        .package(path: "../Vendor/SwiftScript"),
         .package(
             url: "https://github.com/Cocoanetics/ShellKit.git",
-            branch: "main"
+            revision: "40c1b417e6c6318d2ca644d9a3062dc6befd0e31"
         ),
         .package(
             url: "https://github.com/swiftlang/swift-syntax",
-            from: "603.0.0"
+            exact: "603.0.2"
         )
     ],
     targets: [

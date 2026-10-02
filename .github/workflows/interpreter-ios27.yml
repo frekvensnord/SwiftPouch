@@ -83,9 +83,16 @@ jobs:
           xcodebuild \
             -project SwiftInterpreterHost/SwiftInterpreterHost.xcodeproj \
             -scheme SwiftInterpreterHost \
+            -showBuildSettings -json \
+            > "$CI_LOG_DIR/host-build-settings.json"
+          xcodebuild \
+            -project SwiftInterpreterHost/SwiftInterpreterHost.xcodeproj \
+            -scheme SwiftInterpreterHost \
             -configuration Debug \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$CI_DERIVED_DATA" \
+            -disableAutomaticPackageResolution \
+            -jobs 2 \
             CODE_SIGNING_ALLOWED=NO \
             build \
             2>&1 | tee "$CI_LOG_DIR/ios-host-build.log"
@@ -96,11 +103,12 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          reports="$HOME/Library/Logs/DiagnosticReports"
-          if test -d "$reports"; then
-            find "$reports" -maxdepth 1 -type f -iname 'xcodebuild*' \
-              -exec cp {} "$CI_LOG_DIR/" \;
-          fi
+          for reports in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+            if test -d "$reports"; then
+              find "$reports" -maxdepth 1 -type f \( -iname '*xcodebuild*' -o -iname '*xcbuild*' \) \
+                -exec cp {} "$CI_LOG_DIR/" \;
+            fi
+          done
 
       - name: Upload toolchain, dependency locks, logs, and unsigned host build
         if: always()
