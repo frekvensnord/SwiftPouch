@@ -137,6 +137,8 @@ public struct SourceAnalyzer: Sendable {
                         message = "@State supports plain String or Bool literal defaults as persistent mutable cells in the app-view path; whole-source evaluation still requires that specialized path."
                     case "Binding":
                         message = "@Binding supports direct projected @State or @Binding values passed to custom views and expanded as writable aliases in the app-view path; other binding expressions remain unsupported."
+                    case "Environment":
+                        message = "@Environment(\\.scenePhase) is connected to the host scene lifecycle in the app-view path; other environment values remain unsupported."
                     default:
                         message = "Property wrapper '@\(feature.attributeName)' is supported only by its registered app-view runtime path."
                     }
@@ -283,6 +285,9 @@ private final class RuntimeRequirementVisitor: SyntaxVisitor {
                 support = .partial
             } else if attributeName == "Binding", hasSupportedBindingProperty(node) {
                 support = .partial
+            } else if attributeName == "Environment",
+                      hasSupportedScenePhaseEnvironment(attribute, in: node) {
+                support = .partial
             } else {
                 support = .unsupported
             }
@@ -340,6 +345,32 @@ private final class RuntimeRequirementVisitor: SyntaxVisitor {
                 .map(String.init)
         }
         return wrapperNames == ["Binding"]
+    }
+
+    private func hasSupportedScenePhaseEnvironment(
+        _ attribute: AttributeSyntax,
+        in declaration: VariableDeclSyntax
+    ) -> Bool {
+        let attributeSource = String(attribute.trimmedDescription.filter { !$0.isWhitespace })
+        guard attributeSource == #"@Environment(\.scenePhase)"#
+                || attributeSource == #"@SwiftUI.Environment(\.scenePhase)"#,
+              declaration.bindingSpecifier.text == "var",
+              declaration.bindings.count == 1,
+              let binding = declaration.bindings.first,
+              binding.pattern.as(IdentifierPatternSyntax.self) != nil,
+              case nil = binding.initializer,
+              case nil = binding.accessorBlock else {
+            return false
+        }
+
+        let wrapperNames = declaration.attributes.compactMap { element -> String? in
+            guard case .attribute(let attribute) = element else { return nil }
+            return attribute.attributeName.trimmedDescription
+                .split(separator: ".")
+                .last
+                .map(String.init)
+        }
+        return wrapperNames == ["Environment"]
     }
 
     private func isPlainStringOrBooleanLiteral(_ expression: ExprSyntax) -> Bool {

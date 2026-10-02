@@ -116,6 +116,30 @@ final class SourceAnalysisTests: XCTestCase {
         XCTAssertFalse(analysis.isReadyForEvaluation)
     }
 
+    func testScenePhaseEnvironmentIsPartialButDismissRemainsUnsupported() {
+        let analysis = SourceAnalyzer().analyze("""
+        import SwiftUI
+        struct DemoView: View {
+            @Environment(\\.scenePhase) private var scenePhase
+            @Environment(\\.dismiss) private var dismiss
+            var body: some View { Text("Ready") }
+        }
+        """)
+
+        let partialEnvironmentDiagnostics = analysis.diagnostics.filter {
+            $0.code == .partiallySupportedPropertyWrapper
+        }
+        XCTAssertEqual(partialEnvironmentDiagnostics.count, 1)
+        XCTAssertTrue(partialEnvironmentDiagnostics[0].message.contains("scenePhase"))
+
+        let unsupportedEnvironmentDiagnostics = analysis.diagnostics.filter {
+            $0.code == .unsupportedPropertyWrapper
+        }
+        XCTAssertEqual(unsupportedEnvironmentDiagnostics.count, 1)
+        XCTAssertTrue(unsupportedEnvironmentDiagnostics[0].message.contains("Environment"))
+        XCTAssertFalse(analysis.isReadyForEvaluation)
+    }
+
     func testBindingWithoutSimpleStoredValueShapeRemainsUnsupported() {
         let analysis = SourceAnalyzer().analyze("""
         struct ChildView {

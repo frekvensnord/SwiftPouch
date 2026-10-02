@@ -179,6 +179,14 @@ struct CustomViewSourceExpander: Sendable {
                         .last
                         .map(String.init)
                 }
+                if wrapperNames.contains("Environment") {
+                    guard wrapperNames == ["Environment"] else {
+                        throw unsupportedCustomView(name, "@Environment cannot be combined with other wrappers")
+                    }
+                    // Supported environment properties are inherited from the
+                    // host context; they are not synthesized initializer inputs.
+                    continue
+                }
                 if wrapperNames.contains("Binding") {
                     let hasUnsupportedModifier = variable.modifiers.contains { modifier in
                         !["private", "fileprivate", "internal", "public"].contains(modifier.name.text)

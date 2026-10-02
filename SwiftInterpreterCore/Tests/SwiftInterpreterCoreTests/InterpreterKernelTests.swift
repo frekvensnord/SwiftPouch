@@ -1310,6 +1310,103 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(refreshedChildren[0], .text("Changed"))
     }
 
+    func testAppViewReceivesHostScenePhaseOnReloadAndRefresh() async throws {
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SwiftInterpreterScenePhaseTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+
+        let sourceURL = temporaryRoot.appendingPathComponent("ScenePhaseApp.swift")
+        let workspaceRoot = temporaryRoot.appendingPathComponent("Workspaces", isDirectory: true)
+        let workspace = try ProjectWorkspaceStore(rootURL: workspaceRoot).workspace(for: ProjectID())
+        let kernel = InterpreterKernel(workspace: workspace)
+        let source = """
+        import SwiftUI
+
+        @main struct ScenePhaseApp: App {
+            var body: some Scene { WindowGroup { ScenePhaseView() } }
+        }
+
+        struct ScenePhaseView: View {
+            @Environment(\\.scenePhase) private var scenePhase
+
+            var body: some View {
+                if scenePhase == .active {
+                    Text("Active")
+                } else if scenePhase == .inactive {
+                    Text("Inactive")
+                } else {
+                    Text("Background")
+                }
+            }
+        }
+        """
+        try Data(source.utf8).write(to: sourceURL)
+        _ = try await kernel.linkSourceFile(at: sourceURL)
+
+        let background = try await kernel.reloadAndRunApp(scenePhase: .background)
+        XCTAssertEqual(background.scenePhase, .background)
+        XCTAssertEqual(textValues(in: background.rootView), ["Background"])
+
+        let active = try await kernel.refreshAppView(background, scenePhase: .active)
+        XCTAssertEqual(active.scenePhase, .active)
+        XCTAssertEqual(textValues(in: active.rootView), ["Active"])
+
+        let inactive = try await kernel.refreshAppView(active, scenePhase: .inactive)
+        XCTAssertEqual(inactive.scenePhase, .inactive)
+        XCTAssertEqual(textValues(in: inactive.rootView), ["Inactive"])
+
+        let backgroundAgain = try await kernel.refreshAppView(inactive, scenePhase: .background)
+        XCTAssertEqual(textValues(in: backgroundAgain.rootView), ["Background"])
+    }
+
+    func testCustomViewInheritsHostScenePhaseEnvironment() async throws {
+        let source = """
+        import SwiftUI
+
+        struct ParentView: View {
+            var body: some View { ScenePhaseLabel() }
+        }
+
+        struct ScenePhaseLabel: View {
+            @Environment(\\.scenePhase) private var phase
+
+            var body: some View {
+                if phase == .active { Text("Child active") }
+                else { Text("Child inactive") }
+            }
+        }
+        """
+
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let active = try await kernel.lowerViewBody(
+            in: source,
+            typeName: "ParentView",
+            scenePhase: .active
+        )
+        XCTAssertEqual(textValues(in: active), ["Child active"])
+
+        let background = try await kernel.lowerViewBody(
+            in: source,
+            typeName: "ParentView",
+            scenePhase: .background
+        )
+        XCTAssertEqual(textValues(in: background), ["Child inactive"])
+    }
+
+    private func textValues(in node: RuntimeViewNode) -> [String] {
+        switch node {
+        case .text(let value):
+            return [value]
+        case .group(let children), .verticalStack(_, _, let children), .horizontalStack(_, _, let children):
+            return children.flatMap { textValues(in: $0) }
+        case .modified(let content, _):
+            return textValues(in: content)
+        default:
+            return []
+        }
+    }
+
     private func makeWorkspace() throws -> ProjectWorkspace {
         let rootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("SwiftInterpreterCoreTests-\(UUID().uuidString)", isDirectory: true)

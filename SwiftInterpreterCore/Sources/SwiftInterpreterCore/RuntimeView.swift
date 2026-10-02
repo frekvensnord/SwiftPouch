@@ -17,6 +17,13 @@ public struct RuntimeActionID: Codable, Hashable, Sendable {
     }
 }
 
+/// The host app's current scene lifecycle state, exposed to interpreted views.
+public enum RuntimeScenePhase: String, Codable, Hashable, Sendable {
+    case active
+    case inactive
+    case background
+}
+
 public enum RuntimeActionError: Error, LocalizedError, Equatable, Sendable {
     case unknownAction(RuntimeActionID)
 

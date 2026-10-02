@@ -34,18 +34,21 @@ public struct InterpretedAppViewSnapshot: Sendable {
     public let sourceFileName: String
     public let entryPoint: InterpretedAppEntryPoint
     public let rootView: RuntimeViewNode
+    public let scenePhase: RuntimeScenePhase
 
     let sourceSnapshot: ProjectSourceSnapshot
 
     init(
         sourceSnapshot: ProjectSourceSnapshot,
         entryPoint: InterpretedAppEntryPoint,
-        rootView: RuntimeViewNode
+        rootView: RuntimeViewNode,
+        scenePhase: RuntimeScenePhase
     ) {
         self.sourceFileName = sourceSnapshot.fileName
         self.sourceSnapshot = sourceSnapshot
         self.entryPoint = entryPoint
         self.rootView = rootView
+        self.scenePhase = scenePhase
     }
 }
 
@@ -69,6 +72,8 @@ public actor InterpreterKernel {
     private var optionalVariableTypes: [String: String] = [:]
     private var initializedViewStateOwners: [String: String] = [:]
     private var registeredRuntimeActions: [RuntimeActionID: String] = [:]
+    private var currentScenePhase: RuntimeScenePhase = .active
+    private var interpreterScenePhase: RuntimeScenePhase?
     private var evaluationInProgress = false
     private var evaluationWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -186,10 +191,15 @@ public actor InterpreterKernel {
     /// structs using synthesized memberwise initializers are expanded
     /// recursively before lowering. Multiple top-level body expressions are
     /// treated as a Group. This does not evaluate the rest of the type.
-    public func lowerViewBody(in source: String, typeName: String) async throws -> RuntimeViewNode {
+    public func lowerViewBody(
+        in source: String,
+        typeName: String,
+        scenePhase: RuntimeScenePhase = .active
+    ) async throws -> RuntimeViewNode {
         await acquireEvaluationSlot()
         defer { releaseEvaluationSlot() }
 
+        currentScenePhase = scenePhase
         return try await lowerViewBodyInCurrentScope(in: source, typeName: typeName)
     }
 
@@ -197,7 +207,7 @@ public actor InterpreterKernel {
         in source: String,
         typeName: String
     ) async throws -> RuntimeViewNode {
-
+        try await updateInterpreterScenePhase(currentScenePhase)
         let extractedBody = try viewBodySourceEditor.extract(in: source, typeName: typeName)
         let expandedExpression = try customViewSourceExpander.expand(
             extractedBody.expression,
@@ -272,7 +282,9 @@ public actor InterpreterKernel {
     /// the complete-source module preflight; those integrations are separate
     /// runtime work. Each reload starts from a fresh interpreter scope and
     /// replaces the active button-action table.
-    public func reloadAndRunApp() async throws -> InterpretedAppViewSnapshot {
+    public func reloadAndRunApp(
+        scenePhase: RuntimeScenePhase = .active
+    ) async throws -> InterpretedAppViewSnapshot {
         await acquireEvaluationSlot()
         defer { releaseEvaluationSlot() }
 
@@ -283,6 +295,7 @@ public actor InterpreterKernel {
         let entryPoint = try appEntryPointSourceExtractor.extract(from: sourceSnapshot.source)
 
         resetInterpreterScope()
+        currentScenePhase = scenePhase
         let rootView = try await lowerViewBodyInCurrentScope(
             in: sourceSnapshot.source,
             typeName: entryPoint.rootViewTypeName
@@ -290,16 +303,22 @@ public actor InterpreterKernel {
         return InterpretedAppViewSnapshot(
             sourceSnapshot: sourceSnapshot,
             entryPoint: entryPoint,
-            rootView: rootView
+            rootView: rootView,
+            scenePhase: scenePhase
         )
     }
 
     /// Rebuilds one displayed root view after an interpreted action, keeping its
     /// interpreter scope and the source snapshot from the last Reload & Run.
-    public func refreshAppView(_ snapshot: InterpretedAppViewSnapshot) async throws -> InterpretedAppViewSnapshot {
+    public func refreshAppView(
+        _ snapshot: InterpretedAppViewSnapshot,
+        scenePhase: RuntimeScenePhase? = nil
+    ) async throws -> InterpretedAppViewSnapshot {
         await acquireEvaluationSlot()
         defer { releaseEvaluationSlot() }
 
+        let scenePhase = scenePhase ?? snapshot.scenePhase
+        currentScenePhase = scenePhase
         let rootView = try await lowerViewBodyInCurrentScope(
             in: snapshot.sourceSnapshot.source,
             typeName: snapshot.entryPoint.rootViewTypeName
@@ -307,7 +326,8 @@ public actor InterpreterKernel {
         return InterpretedAppViewSnapshot(
             sourceSnapshot: snapshot.sourceSnapshot,
             entryPoint: snapshot.entryPoint,
-            rootView: rootView
+            rootView: rootView,
+            scenePhase: scenePhase
         )
     }
 
@@ -408,6 +428,28 @@ public actor InterpreterKernel {
         optionalVariableTypes.removeAll()
         initializedViewStateOwners.removeAll()
         registeredRuntimeActions.removeAll()
+        interpreterScenePhase = nil
+    }
+
+    private func updateInterpreterScenePhase(_ scenePhase: RuntimeScenePhase) async throws {
+        guard interpreterScenePhase != scenePhase else { return }
+
+        let source: String
+        if interpreterScenePhase == nil {
+            source = """
+            enum __SwiftPouchScenePhase {
+                case active
+                case inactive
+                case background
+            }
+            var __swiftpouch_environment_scenePhase: __SwiftPouchScenePhase = __SwiftPouchScenePhase.\(scenePhase.rawValue)
+            """
+        } else {
+            source = "__swiftpouch_environment_scenePhase = __SwiftPouchScenePhase.\(scenePhase.rawValue)"
+        }
+
+        _ = try await evaluateLocked(source, resetInterpreter: false)
+        interpreterScenePhase = scenePhase
     }
 
     private func seedViewStateDeclarations(

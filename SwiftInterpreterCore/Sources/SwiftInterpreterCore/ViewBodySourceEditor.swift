@@ -7,9 +7,15 @@ struct ViewStateDeclaration: Sendable {
     let initializer: String
 }
 
+struct ViewEnvironmentDeclaration: Sendable {
+    let name: String
+    let storageName: String
+}
+
 struct ExtractedViewBody: Sendable {
     let expression: String
     let stateDeclarations: [ViewStateDeclaration]
+    let environmentDeclarations: [ViewEnvironmentDeclaration]
 }
 
 /// Extracts the computed body property from one top-level struct declaration.
@@ -82,10 +88,85 @@ struct ViewBodySourceEditor: Sendable {
         }
 
         let stateDeclarations = try viewStateDeclarations(in: typeDeclaration, typeName: typeName)
-        return ExtractedViewBody(
-            expression: try rewriteStateReferences(in: expression, declarations: stateDeclarations),
-            stateDeclarations: stateDeclarations
+        let environmentDeclarations = try viewEnvironmentDeclarations(in: typeDeclaration, typeName: typeName)
+        let stateNames = Set(stateDeclarations.map(\.name))
+        if let duplicateName = environmentDeclarations.map(\.name).first(where: { stateNames.contains($0) }) {
+            throw RuntimeViewLoweringError.unsupportedExpression(
+                "view property \(duplicateName) has more than one supported property wrapper in \(typeName)"
+            )
+        }
+
+        let stateRewrittenExpression = try rewriteStateReferences(
+            in: expression,
+            declarations: stateDeclarations
         )
+        return ExtractedViewBody(
+            expression: try rewriteEnvironmentReferences(
+                in: stateRewrittenExpression,
+                declarations: environmentDeclarations
+            ),
+            stateDeclarations: stateDeclarations,
+            environmentDeclarations: environmentDeclarations
+        )
+    }
+
+    private func viewEnvironmentDeclarations(
+        in typeDeclaration: StructDeclSyntax,
+        typeName: String
+    ) throws -> [ViewEnvironmentDeclaration] {
+        var declarations: [ViewEnvironmentDeclaration] = []
+        var names = Set<String>()
+        let variables = typeDeclaration.memberBlock.members.compactMap { member in
+            member.decl.as(VariableDeclSyntax.self)
+        }
+
+        for variable in variables {
+            let environmentAttributes = variable.attributes.compactMap { element -> AttributeSyntax? in
+                guard case .attribute(let attribute) = element else { return nil }
+                let name = attribute.attributeName.trimmedDescription
+                return name == "Environment" || name.hasSuffix(".Environment") ? attribute : nil
+            }
+            guard !environmentAttributes.isEmpty else { continue }
+
+            guard environmentAttributes.count == 1,
+                  isScenePhaseEnvironment(environmentAttributes[0]) else {
+                throw RuntimeViewLoweringError.unsupportedExpression(
+                    "only @Environment(\\.scenePhase) is supported in \(typeName) during Step 28.1"
+                )
+            }
+            guard variable.bindingSpecifier.text == "var",
+                  variable.bindings.count == 1,
+                  let binding = variable.bindings.first,
+                  let identifier = binding.pattern.as(IdentifierPatternSyntax.self),
+                  case nil = binding.initializer,
+                  case nil = binding.accessorBlock else {
+                throw RuntimeViewLoweringError.unsupportedExpression(
+                    "@Environment(\\.scenePhase) in \(typeName) must be one stored mutable property"
+                )
+            }
+
+            let name = identifier.identifier.text
+            guard names.insert(name).inserted else {
+                throw RuntimeViewLoweringError.unsupportedExpression(
+                    "environment property \(name) is declared more than once in \(typeName)"
+                )
+            }
+            declarations.append(ViewEnvironmentDeclaration(
+                name: name,
+                storageName: scenePhaseStorageName
+            ))
+        }
+        return declarations
+    }
+
+    private func isScenePhaseEnvironment(_ attribute: AttributeSyntax) -> Bool {
+        let source = String(attribute.trimmedDescription.filter { !$0.isWhitespace })
+        return source == #"@Environment(\.scenePhase)"#
+            || source == #"@SwiftUI.Environment(\.scenePhase)"#
+    }
+
+    private var scenePhaseStorageName: String {
+        "__swiftpouch_environment_scenePhase"
     }
 
     private func viewStateDeclarations(
@@ -167,24 +248,82 @@ struct ViewBodySourceEditor: Sendable {
     ) throws -> String {
         guard !declarations.isEmpty else { return expression }
 
+        let replacementsByName = Dictionary(uniqueKeysWithValues: declarations.map {
+            ($0.name, $0.storageName)
+        })
+        return try rewriteViewPropertyReferences(
+            in: expression,
+            replacementsByName: replacementsByName,
+            projectedReferencesAllowed: true,
+            propertyWrapperName: "@State"
+        )
+    }
+
+    private func rewriteEnvironmentReferences(
+        in expression: String,
+        declarations: [ViewEnvironmentDeclaration]
+    ) throws -> String {
+        guard !declarations.isEmpty else { return expression }
+
+        let replacementsByName = Dictionary(uniqueKeysWithValues: declarations.map {
+            ($0.name, $0.storageName)
+        })
+        let rewritten = try rewriteViewPropertyReferences(
+            in: expression,
+            replacementsByName: replacementsByName,
+            projectedReferencesAllowed: false,
+            propertyWrapperName: "@Environment"
+        )
+        return try qualifyScenePhaseCases(in: rewritten)
+    }
+
+    private func qualifyScenePhaseCases(in expression: String) throws -> String {
         let syntaxTree = Parser.parse(source: expression)
         guard !syntaxTree.hasError else {
             throw RuntimeViewLoweringError.malformedSyntax
         }
 
-        let replacementsByName = Dictionary(uniqueKeysWithValues: declarations.map {
-            ($0.name, $0.storageName)
-        })
+        let visitor = ScenePhaseCaseReferenceVisitor(storageName: scenePhaseStorageName)
+        visitor.walk(syntaxTree)
+        var bytes = Array(expression.utf8)
+        for replacement in visitor.replacements.sorted(by: { $0.start > $1.start }) {
+            guard replacement.start <= replacement.end, replacement.end <= bytes.count else {
+                throw RuntimeViewLoweringError.malformedSyntax
+            }
+            bytes.replaceSubrange(replacement.start..<replacement.end, with: replacement.text.utf8)
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private func rewriteViewPropertyReferences(
+        in expression: String,
+        replacementsByName: [String: String],
+        projectedReferencesAllowed: Bool,
+        propertyWrapperName: String
+    ) throws -> String {
+        let syntaxTree = Parser.parse(source: expression)
+        guard !syntaxTree.hasError else {
+            throw RuntimeViewLoweringError.malformedSyntax
+        }
+
         let localBindings = StateLocalBindingVisitor()
         localBindings.walk(syntaxTree)
         if let shadowedName = localBindings.names.intersection(replacementsByName.keys).sorted().first {
             throw RuntimeViewLoweringError.unsupportedExpression(
-                "view body shadows @State property \(shadowedName); rename the local binding"
+                "view body shadows \(propertyWrapperName) property \(shadowedName); rename the local binding"
             )
         }
 
-        let visitor = StateReferenceVisitor(replacementsByName: replacementsByName)
+        let visitor = StateReferenceVisitor(
+            replacementsByName: replacementsByName,
+            projectedReferencesAllowed: projectedReferencesAllowed
+        )
         visitor.walk(syntaxTree)
+        if let projectedName = visitor.unsupportedProjectedPropertyName {
+            throw RuntimeViewLoweringError.unsupportedExpression(
+                "\(propertyWrapperName) property \(projectedName) does not support projected access"
+            )
+        }
 
         var bytes = Array(expression.utf8)
         for replacement in visitor.replacements.sorted(by: { $0.start > $1.start }) {
@@ -252,10 +391,13 @@ private final class StateLocalBindingVisitor: SyntaxVisitor {
 
 private final class StateReferenceVisitor: SyntaxVisitor {
     private let replacementsByName: [String: String]
+    private let projectedReferencesAllowed: Bool
     private(set) var replacements: [StateReferenceReplacement] = []
+    private(set) var unsupportedProjectedPropertyName: String?
 
-    init(replacementsByName: [String: String]) {
+    init(replacementsByName: [String: String], projectedReferencesAllowed: Bool) {
         self.replacementsByName = replacementsByName
+        self.projectedReferencesAllowed = projectedReferencesAllowed
         super.init(viewMode: .sourceAccurate)
     }
 
@@ -270,6 +412,10 @@ private final class StateReferenceVisitor: SyntaxVisitor {
         let isProjection = rawName.hasPrefix("$") || projectedPrefix != nil
         guard let replacement = replacementsByName[propertyName(from: rawName)],
               !isFunctionName(node) else {
+            return .visitChildren
+        }
+        if isProjection && !projectedReferencesAllowed {
+            unsupportedProjectedPropertyName = propertyName(from: rawName)
             return .visitChildren
         }
         let start = projectedPrefix?.positionAfterSkippingLeadingTrivia.utf8Offset
@@ -293,6 +439,10 @@ private final class StateReferenceVisitor: SyntaxVisitor {
         }
         let isProjection = node.declName.baseName.text.hasPrefix("$")
             || node.trimmedDescription.contains(".$")
+        if isProjection && !projectedReferencesAllowed {
+            unsupportedProjectedPropertyName = propertyName(from: node.declName.baseName.text)
+            return .skipChildren
+        }
         replacements.append(StateReferenceReplacement(
             start: node.positionAfterSkippingLeadingTrivia.utf8Offset,
             end: node.endPositionBeforeTrailingTrivia.utf8Offset,
@@ -311,5 +461,47 @@ private final class StateReferenceVisitor: SyntaxVisitor {
                 == node.positionAfterSkippingLeadingTrivia.utf8Offset
             && call.calledExpression.endPositionBeforeTrailingTrivia.utf8Offset
                 == node.endPositionBeforeTrailingTrivia.utf8Offset
+    }
+}
+
+private final class ScenePhaseCaseReferenceVisitor: SyntaxVisitor {
+    private let storageName: String
+    private(set) var replacements: [StateReferenceReplacement] = []
+    private let caseNames: Set<String> = ["active", "inactive", "background"]
+
+    init(storageName: String) {
+        self.storageName = storageName
+        super.init(viewMode: .sourceAccurate)
+    }
+
+    override func visit(_ node: InfixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
+        guard ["==", "!="].contains(node.operator.trimmedDescription) else {
+            return .visitChildren
+        }
+
+        if isScenePhaseStorage(node.leftOperand),
+           let phaseCase = node.rightOperand.as(MemberAccessExprSyntax.self) {
+            qualify(phaseCase)
+        } else if isScenePhaseStorage(node.rightOperand),
+                  let phaseCase = node.leftOperand.as(MemberAccessExprSyntax.self) {
+            qualify(phaseCase)
+        }
+        return .visitChildren
+    }
+
+    private func isScenePhaseStorage(_ expression: ExprSyntax) -> Bool {
+        expression.as(DeclReferenceExprSyntax.self)?.baseName.text == storageName
+    }
+
+    private func qualify(_ memberAccess: MemberAccessExprSyntax) {
+        guard case nil = memberAccess.base,
+              caseNames.contains(memberAccess.declName.baseName.text) else {
+            return
+        }
+        replacements.append(StateReferenceReplacement(
+            start: memberAccess.positionAfterSkippingLeadingTrivia.utf8Offset,
+            end: memberAccess.endPositionBeforeTrailingTrivia.utf8Offset,
+            text: "__SwiftPouchScenePhase.\(memberAccess.declName.baseName.text)"
+        ))
     }
 }

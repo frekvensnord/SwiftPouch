@@ -14,11 +14,13 @@ import UniformTypeIdentifiers
 public struct InterpreterSourceFileControls: View {
     private let kernel: InterpreterKernel
 
+    @Environment(\.scenePhase) private var hostScenePhase
     @State private var linkedFile: ProjectSourceFileReference?
     @State private var appViewSnapshot: InterpretedAppViewSnapshot?
     @State private var errorMessage: String?
     @State private var isFileImporterPresented = false
     @State private var isWorking = false
+    @State private var pendingScenePhase: RuntimeScenePhase?
 
     public init(kernel: InterpreterKernel) {
         self.kernel = kernel
@@ -82,6 +84,10 @@ public struct InterpreterSourceFileControls: View {
         .onAppear {
             Task { await refreshLinkedFile() }
         }
+        .onChange(of: hostScenePhase) { newPhase in
+            pendingScenePhase = Self.runtimeScenePhase(for: newPhase)
+            Task { await refreshPendingScenePhaseIfPossible() }
+        }
     }
 
     private func handleFileImporterResult(_ result: Result<[URL], Error>) {
@@ -108,13 +114,14 @@ public struct InterpreterSourceFileControls: View {
         isWorking = true
         errorMessage = nil
         appViewSnapshot = nil
-        defer { isWorking = false }
 
         do {
             linkedFile = try await kernel.linkSourceFile(at: url)
         } catch {
             errorMessage = error.localizedDescription
         }
+        isWorking = false
+        await refreshPendingScenePhaseIfPossible()
     }
 
     private func refreshLinkedFile() async {
@@ -129,13 +136,17 @@ public struct InterpreterSourceFileControls: View {
         isWorking = true
         errorMessage = nil
         appViewSnapshot = nil
-        defer { isWorking = false }
+        pendingScenePhase = nil
 
         do {
-            appViewSnapshot = try await kernel.reloadAndRunApp()
+            appViewSnapshot = try await kernel.reloadAndRunApp(
+                scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
+            )
         } catch {
             errorMessage = error.localizedDescription
         }
+        isWorking = false
+        await refreshPendingScenePhaseIfPossible()
     }
 
     private func performAction(_ actionID: RuntimeActionID, in snapshot: InterpretedAppViewSnapshot) {
@@ -144,13 +155,17 @@ public struct InterpreterSourceFileControls: View {
         errorMessage = nil
 
         Task {
-            defer { isWorking = false }
             do {
                 _ = try await kernel.performAction(actionID)
-                appViewSnapshot = try await kernel.refreshAppView(snapshot)
+                appViewSnapshot = try await kernel.refreshAppView(
+                    snapshot,
+                    scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
+                )
             } catch {
                 errorMessage = error.localizedDescription
             }
+            isWorking = false
+            await refreshPendingScenePhaseIfPossible()
         }
     }
 
@@ -158,13 +173,47 @@ public struct InterpreterSourceFileControls: View {
         isWorking = true
         errorMessage = nil
         appViewSnapshot = nil
-        defer { isWorking = false }
 
         do {
             try await kernel.unlinkSourceFile()
             linkedFile = nil
         } catch {
             errorMessage = error.localizedDescription
+        }
+        isWorking = false
+        await refreshPendingScenePhaseIfPossible()
+    }
+
+    private func refreshPendingScenePhaseIfPossible() async {
+        while !isWorking,
+              let requestedPhase = pendingScenePhase,
+              let snapshot = appViewSnapshot {
+            pendingScenePhase = nil
+            guard snapshot.scenePhase != requestedPhase else { continue }
+
+            isWorking = true
+            do {
+                appViewSnapshot = try await kernel.refreshAppView(
+                    snapshot,
+                    scenePhase: requestedPhase
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isWorking = false
+        }
+    }
+
+    private static func runtimeScenePhase(for scenePhase: ScenePhase) -> RuntimeScenePhase {
+        switch scenePhase {
+        case .active:
+            return .active
+        case .inactive:
+            return .inactive
+        case .background:
+            return .background
+        @unknown default:
+            return .inactive
         }
     }
 }
