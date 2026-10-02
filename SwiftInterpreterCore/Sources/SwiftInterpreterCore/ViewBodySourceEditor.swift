@@ -260,14 +260,26 @@ private final class StateReferenceVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
-        guard let replacement = replacementsByName[node.baseName.text],
+        let rawName = node.baseName.text
+        let projectedPrefix: PrefixOperatorExprSyntax?
+        if let prefix = node.parent?.as(PrefixOperatorExprSyntax.self), prefix.operator.text == "$" {
+            projectedPrefix = prefix
+        } else {
+            projectedPrefix = nil
+        }
+        let isProjection = rawName.hasPrefix("$") || projectedPrefix != nil
+        guard let replacement = replacementsByName[propertyName(from: rawName)],
               !isFunctionName(node) else {
             return .visitChildren
         }
+        let start = projectedPrefix?.positionAfterSkippingLeadingTrivia.utf8Offset
+            ?? node.positionAfterSkippingLeadingTrivia.utf8Offset
+        let end = projectedPrefix?.endPositionBeforeTrailingTrivia.utf8Offset
+            ?? node.endPositionBeforeTrailingTrivia.utf8Offset
         replacements.append(StateReferenceReplacement(
-            start: node.positionAfterSkippingLeadingTrivia.utf8Offset,
-            end: node.endPositionBeforeTrailingTrivia.utf8Offset,
-            text: replacement
+            start: start,
+            end: end,
+            text: isProjection ? "$\(replacement)" : replacement
         ))
         return .visitChildren
     }
@@ -275,16 +287,22 @@ private final class StateReferenceVisitor: SyntaxVisitor {
     override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
         guard let base = node.base?.as(DeclReferenceExprSyntax.self),
               base.baseName.text == "self",
-              let replacement = replacementsByName[node.declName.baseName.text],
+              let replacement = replacementsByName[propertyName(from: node.declName.baseName.text)],
               !isFunctionName(node) else {
             return .visitChildren
         }
+        let isProjection = node.declName.baseName.text.hasPrefix("$")
+            || node.trimmedDescription.contains(".$")
         replacements.append(StateReferenceReplacement(
             start: node.positionAfterSkippingLeadingTrivia.utf8Offset,
             end: node.endPositionBeforeTrailingTrivia.utf8Offset,
-            text: replacement
+            text: isProjection ? "$\(replacement)" : replacement
         ))
         return .skipChildren
+    }
+
+    private func propertyName(from reference: String) -> String {
+        reference.hasPrefix("$") ? String(reference.dropFirst()) : reference
     }
 
     private func isFunctionName(_ node: some SyntaxProtocol) -> Bool {
