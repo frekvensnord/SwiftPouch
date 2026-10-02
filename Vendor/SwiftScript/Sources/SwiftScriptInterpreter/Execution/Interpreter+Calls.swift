@@ -964,6 +964,18 @@ extension Interpreter {
             try storage.write(.bool(!b))
             return .void
 
+        case (.string(let text), "append"):
+            guard call.arguments.count == 1,
+                  call.arguments.first?.label == nil,
+                  call.trailingClosure == nil else { return nil }
+            try storage.requireMutable(varName: varName)
+            let suffix = try await evaluate(call.arguments.first!.expression, in: scope)
+            guard case .string(let addition) = suffix else {
+                throw RuntimeError.invalid("String.append: argument must be String or Character")
+            }
+            try storage.write(.string(text + addition))
+            return .void
+
         case (.set(var xs), let m) where ["insert", "remove", "formUnion", "formIntersection", "subtract", "formSymmetricDifference"].contains(m):
             try storage.requireMutable(varName: varName)
             let argSyntaxes = Array(call.arguments)

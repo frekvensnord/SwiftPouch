@@ -323,6 +323,14 @@ extension Interpreter {
             {
                 return try await invokeBuiltinExtensionMethod(getter, on: receiver, args: [])
             }
+            if name == "localizedDescription",
+               let getter = enumDefs[typeName]?.methods["errorDescription"],
+               getter.parameters.isEmpty {
+                let description = try await invokeBuiltinExtensionMethod(getter, on: receiver, args: [])
+                if case .string(let text) = description { return .string(text) }
+                if case .optional(.some(.string(let text))) = description { return .string(text) }
+                return .string(receiver.description)
+            }
         default: break
         }
         // Extension computed property on a built-in receiver type.

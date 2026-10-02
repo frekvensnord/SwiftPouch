@@ -76,6 +76,7 @@ jobs:
             2>&1 | tee "$CI_LOG_DIR/xcode-resolve.log"
 
       - name: Build iOS host for device SDK
+        id: host_build
         if: ${{ !cancelled() && steps.host_resolve.outcome == 'success' }}
         shell: bash
         run: |
@@ -83,8 +84,10 @@ jobs:
           xcodebuild \
             -project SwiftInterpreterHost/SwiftInterpreterHost.xcodeproj \
             -scheme SwiftInterpreterHost \
-            -showBuildSettings -json \
-            > "$CI_LOG_DIR/host-build-settings.json"
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -showBuildSettings \
+            > "$CI_LOG_DIR/host-build-settings.log"
           xcodebuild \
             -project SwiftInterpreterHost/SwiftInterpreterHost.xcodeproj \
             -scheme SwiftInterpreterHost \
@@ -98,6 +101,21 @@ jobs:
             2>&1 | tee "$CI_LOG_DIR/ios-host-build.log"
 
           test -d "$CI_DERIVED_DATA/Build/Products/Debug-iphoneos/SwiftInterpreterHost.app"
+
+      - name: Capture xcodebuild backtrace on host failure
+        if: ${{ failure() && steps.host_build.outcome == 'failure' }}
+        shell: bash
+        run: |
+          xcrun lldb --batch \
+            -o run \
+            -o 'thread backtrace all' \
+            -- "$(xcrun --find xcodebuild)" \
+            -project SwiftInterpreterHost/SwiftInterpreterHost.xcodeproj \
+            -scheme SwiftInterpreterHost \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -showBuildSettings \
+            > "$CI_LOG_DIR/xcodebuild-backtrace.log" 2>&1 || true
 
       - name: Collect xcodebuild crash diagnostics
         if: failure()
