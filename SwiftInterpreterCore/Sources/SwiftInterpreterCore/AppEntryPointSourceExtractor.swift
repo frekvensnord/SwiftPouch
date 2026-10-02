@@ -109,6 +109,9 @@ public struct AppEntryPointSourceExtractor: Sendable {
         }
 
         let rootViewTypeName = rootTypeReference.baseName.text
+        guard rootViewTypeName.first?.isUppercase == true else {
+            throw AppEntryPointExtractionError.unsupportedRootViewExpression
+        }
         let matchingRootTypes = topLevelStructs.filter { $0.name.text == rootViewTypeName }
         guard !matchingRootTypes.isEmpty else {
             throw AppEntryPointExtractionError.rootViewTypeNotFound(rootViewTypeName)

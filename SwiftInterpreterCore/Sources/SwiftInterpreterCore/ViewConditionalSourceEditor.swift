@@ -18,7 +18,11 @@ struct ViewConditionalSourceEditor {
         let visitor = FirstConditionalVisitor()
         visitor.walk(syntaxTree)
         guard let conditional = visitor.conditional else { return nil }
-        let bindings = try viewConditionalBindings(in: conditional.conditions)
+        let clauses = try viewConditionalClauses(in: conditional.conditions)
+        let bindings = clauses.compactMap { clause -> ViewConditionalBinding? in
+            guard case .optionalBinding(let binding) = clause else { return nil }
+            return binding
+        }
         let simpleConditionExpression: String?
         if conditional.conditions.count == 1,
            let condition = conditional.conditions.first,
@@ -43,6 +47,7 @@ struct ViewConditionalSourceEditor {
         return ViewConditionalSite(
             conditionExpression: simpleConditionExpression,
             conditionSource: viewConditionalConditionSource(conditional.conditions),
+            clauses: clauses,
             bindings: bindings,
             trueBranchSource: conditional.body.statements.description,
             falseBranchSource: falseBranchSource,
@@ -85,35 +90,58 @@ func viewBuilderConditional(in item: CodeBlockItemSyntax.Item) -> IfExprSyntax? 
 }
 
 func viewConditionalBindings(in conditions: ConditionElementListSyntax) throws -> [ViewConditionalBinding] {
-    var bindings: [ViewConditionalBinding] = []
+    try viewConditionalClauses(in: conditions).compactMap { clause in
+        guard case .optionalBinding(let binding) = clause else { return nil }
+        return binding
+    }
+}
+
+func viewConditionalClauses(in conditions: ConditionElementListSyntax) throws -> [ViewConditionalClause] {
+    var clauses: [ViewConditionalClause] = []
     for condition in conditions {
-        let optionalBinding: OptionalBindingConditionSyntax
         switch condition.condition {
-        case .expression:
-            continue
-        case .optionalBinding(let binding):
-            optionalBinding = binding
+        case .expression(let expression):
+            clauses.append(.expression(expression.trimmedDescription))
+        case .optionalBinding(let optionalBinding):
+            guard optionalBinding.bindingSpecifier.text == "let",
+                  let pattern = optionalBinding.pattern.as(IdentifierPatternSyntax.self) else {
+                throw RuntimeViewLoweringError.unsupportedExpression(
+                    "optional binding must use a simple 'let' name: \(condition.trimmedDescription)"
+                )
+            }
+
+            let name = pattern.identifier.text
+            let initializer = optionalBinding.initializer?.value.trimmedDescription ?? name
+            let typeAnnotation = optionalBinding.typeAnnotation?.trimmedDescription ?? ""
+            clauses.append(.optionalBinding(
+                ViewConditionalBinding(
+                    name: name,
+                    initializer: initializer,
+                    typeAnnotation: typeAnnotation
+                )
+            ))
         default:
             throw RuntimeViewLoweringError.unsupportedExpression(
                 "conditional clause is not supported: \(condition.trimmedDescription)"
             )
         }
-
-        guard optionalBinding.bindingSpecifier.text == "let",
-              let pattern = optionalBinding.pattern.as(IdentifierPatternSyntax.self) else {
-            throw RuntimeViewLoweringError.unsupportedExpression(
-                "optional binding must use a simple 'let' name: \(condition.trimmedDescription)"
-            )
-        }
-
-        let name = pattern.identifier.text
-        let initializer = optionalBinding.initializer?.value.trimmedDescription ?? name
-        let typeAnnotation = optionalBinding.typeAnnotation?.trimmedDescription ?? ""
-        bindings.append(
-            ViewConditionalBinding(clause: "let \(name)\(typeAnnotation) = \(initializer)")
-        )
     }
-    return bindings
+    return clauses
+}
+
+enum ViewConditionalClause: Sendable, Hashable {
+    case expression(String)
+    case optionalBinding(ViewConditionalBinding)
+}
+
+struct ViewConditionalBinding: Sendable, Hashable {
+    let name: String
+    let initializer: String
+    let typeAnnotation: String
+
+    var declaration: String {
+        "let \(name)\(typeAnnotation) = \(initializer)"
+    }
 }
 
 func viewConditionalConditionSource(_ conditions: ConditionElementListSyntax) -> String {
@@ -123,15 +151,12 @@ func viewConditionalConditionSource(_ conditions: ConditionElementListSyntax) ->
 struct ViewConditionalSite: Sendable {
     let conditionExpression: String?
     let conditionSource: String
+    let clauses: [ViewConditionalClause]
     let bindings: [ViewConditionalBinding]
     let trueBranchSource: String
     let falseBranchSource: String
     let startUTF8Offset: Int
     let endUTF8Offset: Int
-}
-
-struct ViewConditionalBinding: Sendable, Hashable {
-    let clause: String
 }
 
 private final class FirstConditionalVisitor: SyntaxVisitor {

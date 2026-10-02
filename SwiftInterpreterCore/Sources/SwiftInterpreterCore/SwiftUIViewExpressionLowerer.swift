@@ -371,13 +371,19 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         let spacingArgument = call.arguments.first { $0.label?.text == "spacing" }?.expression
         let children = try lowerViewBuilderStatements(closure.statements)
         let childNodes: [RuntimeViewNode]
-        switch children {
-        case .empty:
-            childNodes = []
-        case .group(let nodes):
-            childNodes = nodes
-        default:
+        let isSingleConditional = closure.statements.count == 1
+            && closure.statements.first.flatMap { viewBuilderConditional(in: $0.item) } != nil
+        if isSingleConditional {
             childNodes = [children]
+        } else {
+            switch children {
+            case .empty:
+                childNodes = []
+            case .group(let nodes):
+                childNodes = nodes
+            default:
+                childNodes = [children]
+            }
         }
 
         if isVertical {
@@ -913,9 +919,19 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     }
 
     private func runtimeBackgroundStyle(_ expression: ExprSyntax) throws -> RuntimeBackgroundStyle {
-        if let name = staticMemberName(expression),
-           let material = RuntimeMaterialStyle(rawValue: name) {
-            return .material(material)
+        if let name = staticMemberName(expression) {
+            let materialName: String
+            switch name {
+            case "ultraThinMaterial": materialName = "ultraThin"
+            case "thinMaterial": materialName = "thin"
+            case "regularMaterial": materialName = "regular"
+            case "thickMaterial": materialName = "thick"
+            case "ultraThickMaterial": materialName = "ultraThick"
+            default: materialName = name
+            }
+            if let material = RuntimeMaterialStyle(rawValue: materialName) {
+                return .material(material)
+            }
         }
         return .color(try runtimeColorValue(expression))
     }
