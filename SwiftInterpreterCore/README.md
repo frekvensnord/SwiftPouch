@@ -517,9 +517,10 @@ interpreter scope. Step 27 replaces snapshot-only state defaults with mutable
 interpreter cells keyed by owning view type and property. It rewrites state
 references consistently across a body and its action closures, and expands a
 direct `$state` projection into a custom view's `@Binding` property as a
-writable alias to the same cell. The supported initializers remain plain
-String and Bool literals; native controls, nested state-owning views, and
-dynamic repeated-view identity are later work. `@StateObject`,
+writable alias to the same cell. A child `@Binding` projection is retained
+when passed onward to another custom view. The supported initializers remain
+plain String and Bool literals; native controls, nested state-owning views,
+and dynamic repeated-view identity are later work. `@StateObject`,
 `@ObservedObject`, `@Published`, and `@Environment` remain later bridges.
 Whole-source preflight still blocks these app-view wrappers because it does
 not run the specialized body-lowering path. Step 16 handles simple identifier

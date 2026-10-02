@@ -48,13 +48,16 @@ owning view type and property, so same-named properties in different view
 types remain independent across body refreshes. Rewrite reads, writes, and
 projected references to the owning cell. Expand a simple custom-view
 `@Binding var value: T` passed directly as `$state`, so child reads and writes
-use the exact parent cell. Keep native input rendering for the controls step.
+use the exact parent cell. Preserve projected child bindings when a custom
+view forwards them to another custom view. Keep native input rendering for
+the controls step.
 
 The current supported initializer subset is a plain String or Bool literal.
 The binding subset is one typed stored `@Binding` property receiving a direct
-`$identifier` projection during custom-view expansion. State owned by nested
-or dynamically repeated view instances, nonliteral defaults, and native
-`Binding` controls remain outside this step.
+`$identifier` projection during custom-view expansion. A child may forward its
+projected binding to another custom view, preserving the original state cell.
+State owned by nested or dynamically repeated view instances, nonliteral
+defaults, and native `Binding` controls remain outside this step.
 
 **Done when:** repeated body lowering preserves a cell's current value,
 same-named state in different view types is isolated, a binding-backed child

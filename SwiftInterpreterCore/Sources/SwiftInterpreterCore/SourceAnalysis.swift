@@ -136,7 +136,7 @@ public struct SourceAnalyzer: Sendable {
                     case "State":
                         message = "@State supports plain String or Bool literal defaults as persistent mutable cells in the app-view path; whole-source evaluation still requires that specialized path."
                     case "Binding":
-                        message = "@Binding supports a direct projected @State value passed to a custom view and expanded as a writable alias in the app-view path; other binding expressions remain unsupported."
+                        message = "@Binding supports direct projected @State or @Binding values passed to custom views and expanded as writable aliases in the app-view path; other binding expressions remain unsupported."
                     default:
                         message = "Property wrapper '@\(feature.attributeName)' is supported only by its registered app-view runtime path."
                     }

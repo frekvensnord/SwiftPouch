@@ -636,6 +636,54 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(pausedChildren[0], .text("Paused"))
     }
 
+    func testBindingProjectionForwardsThroughCustomViewsToTheSameStateCell() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct HostView: View {
+            @State private var draft = "Initial"
+
+            var body: some View {
+                VStack {
+                    Text(draft)
+                    ForwardingView(text: $draft)
+                }
+            }
+        }
+
+        struct ForwardingView: View {
+            @Binding var text: String
+
+            var body: some View {
+                EditingView(text: self.$text)
+            }
+        }
+
+        struct EditingView: View {
+            @Binding var text: String
+
+            var body: some View {
+                Button("Update") { self.text = "Updated" }
+            }
+        }
+        """
+
+        let initial = try await kernel.lowerViewBody(in: source, typeName: "HostView")
+        guard case .verticalStack(_, _, let initialChildren) = initial,
+              initialChildren.count == 2,
+              case .button(_, let updateActionID, _) = initialChildren[1] else {
+            return XCTFail("Expected the forwarded binding and Update button")
+        }
+        XCTAssertEqual(initialChildren[0], .text("Initial"))
+
+        _ = try await kernel.performAction(updateActionID)
+        let updated = try await kernel.lowerViewBody(in: source, typeName: "HostView")
+        guard case .verticalStack(_, _, let updatedChildren) = updated,
+              updatedChildren.count == 2 else {
+            return XCTFail("Expected the forwarded binding to rebuild the host view")
+        }
+        XCTAssertEqual(updatedChildren[0], .text("Updated"))
+    }
+
     func testCustomViewTextInputRefreshesFromTheCurrentInterpreterScope() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         _ = try await kernel.evaluate("var liveCaption = \"First\"")

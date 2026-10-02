@@ -4,6 +4,7 @@ import SwiftSyntax
 /// Expands simple top-level custom `View` calls before view-expression lowering.
 /// Synthesized memberwise initializers support immutable inputs and direct
 /// projections of parent `@State` cells into child `@Binding` properties.
+/// Projected child bindings are preserved when they are forwarded again.
 struct CustomViewSourceExpander: Sendable {
     private let bodySourceEditor = ViewBodySourceEditor()
 
@@ -233,7 +234,7 @@ struct CustomViewSourceExpander: Sendable {
     private func argumentValues(
         for call: FunctionCallExprSyntax,
         definition: CustomViewDefinition
-    ) throws -> [String: String] {
+    ) throws -> [String: CustomViewArgumentValue] {
         guard call.trailingClosure == nil,
               call.additionalTrailingClosures.isEmpty,
               call.arguments.count == definition.inputs.count else {
@@ -242,7 +243,7 @@ struct CustomViewSourceExpander: Sendable {
             )
         }
 
-        var values: [String: String] = [:]
+        var values: [String: CustomViewArgumentValue] = [:]
         for (argument, input) in zip(call.arguments, definition.inputs) {
             guard argument.label?.text == input.name,
                   argument.expression.as(ClosureExprSyntax.self) == nil else {
@@ -257,9 +258,15 @@ struct CustomViewSourceExpander: Sendable {
                         "custom view @Binding input \(input.name) must receive a direct $state projection"
                     )
                 }
-                values[input.name] = projectedName
+                values[input.name] = CustomViewArgumentValue(
+                    expression: projectedName,
+                    supportsProjection: true
+                )
             } else {
-                values[input.name] = expression
+                values[input.name] = CustomViewArgumentValue(
+                    expression: expression,
+                    supportsProjection: false
+                )
             }
         }
         return values
@@ -276,7 +283,10 @@ struct CustomViewSourceExpander: Sendable {
         return identifier
     }
 
-    private func substituting(_ values: [String: String], into body: String) throws -> String {
+    private func substituting(
+        _ values: [String: CustomViewArgumentValue],
+        into body: String
+    ) throws -> String {
         guard !values.isEmpty else { return body }
 
         let syntaxTree = Parser.parse(source: body)
@@ -296,10 +306,21 @@ struct CustomViewSourceExpander: Sendable {
 
         let references = StoredPropertyReferenceVisitor()
         references.walk(expression)
-        let replacements = references.references.compactMap { reference -> SourceReplacement? in
-            guard let value = values[reference.name], !reference.isFunctionName else { return nil }
-            return SourceReplacement(start: reference.start, end: reference.end, text: value)
-        }.sorted { $0.start > $1.start }
+        var replacements: [SourceReplacement] = []
+        for reference in references.references {
+            guard let value = values[reference.name], !reference.isFunctionName else { continue }
+            if reference.isProjection && !value.supportsProjection {
+                throw RuntimeViewLoweringError.unsupportedExpression(
+                    "custom view input \(reference.name) is not a projected @Binding value"
+                )
+            }
+            replacements.append(SourceReplacement(
+                start: reference.start,
+                end: reference.end,
+                text: reference.isProjection ? "$\(value.expression)" : value.expression
+            ))
+        }
+        replacements.sort { $0.start > $1.start }
 
         var bytes = Array(body.utf8)
         for replacement in replacements {
@@ -336,6 +357,11 @@ private struct CustomViewInput {
     }
 }
 
+private struct CustomViewArgumentValue {
+    let expression: String
+    let supportsProjection: Bool
+}
+
 private struct CustomViewCall {
     let name: String
     let syntax: FunctionCallExprSyntax
@@ -370,6 +396,7 @@ private struct StoredPropertyReference {
     let start: Int
     let end: Int
     let isFunctionName: Bool
+    let isProjection: Bool
 }
 
 private final class StoredPropertyReferenceVisitor: SyntaxVisitor {
@@ -380,20 +407,32 @@ private final class StoredPropertyReferenceVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
-        let start = node.positionAfterSkippingLeadingTrivia.utf8Offset
-        let end = node.endPositionBeforeTrailingTrivia.utf8Offset
+        let rawName = node.baseName.text
+        let projectedPrefix: PrefixOperatorExprSyntax?
+        if let prefix = node.parent?.as(PrefixOperatorExprSyntax.self), prefix.operator.text == "$" {
+            projectedPrefix = prefix
+        } else {
+            projectedPrefix = nil
+        }
+        let start = projectedPrefix?.positionAfterSkippingLeadingTrivia.utf8Offset
+            ?? node.positionAfterSkippingLeadingTrivia.utf8Offset
+        let end = projectedPrefix?.endPositionBeforeTrailingTrivia.utf8Offset
+            ?? node.endPositionBeforeTrailingTrivia.utf8Offset
         var isFunctionName = false
         if let call = node.parent?.as(FunctionCallExprSyntax.self) {
-            isFunctionName = call.calledExpression.positionAfterSkippingLeadingTrivia.utf8Offset == start
-                && call.calledExpression.endPositionBeforeTrailingTrivia.utf8Offset == end
+            isFunctionName = call.calledExpression.positionAfterSkippingLeadingTrivia.utf8Offset
+                    == node.positionAfterSkippingLeadingTrivia.utf8Offset
+                && call.calledExpression.endPositionBeforeTrailingTrivia.utf8Offset
+                    == node.endPositionBeforeTrailingTrivia.utf8Offset
         }
 
         references.append(
             StoredPropertyReference(
-                name: node.baseName.text,
+                name: propertyName(from: rawName),
                 start: start,
                 end: end,
-                isFunctionName: isFunctionName
+                isFunctionName: isFunctionName,
+                isProjection: rawName.hasPrefix("$") || projectedPrefix != nil
             )
         )
         return .visitChildren
@@ -415,13 +454,19 @@ private final class StoredPropertyReferenceVisitor: SyntaxVisitor {
             isFunctionName = false
         }
 
+        let rawName = node.declName.baseName.text
         references.append(StoredPropertyReference(
-            name: node.declName.baseName.text,
+            name: propertyName(from: rawName),
             start: start,
             end: end,
-            isFunctionName: isFunctionName
+            isFunctionName: isFunctionName,
+            isProjection: rawName.hasPrefix("$") || node.trimmedDescription.contains(".$")
         ))
         return .skipChildren
+    }
+
+    private func propertyName(from reference: String) -> String {
+        reference.hasPrefix("$") ? String(reference.dropFirst()) : reference
     }
 }
 
