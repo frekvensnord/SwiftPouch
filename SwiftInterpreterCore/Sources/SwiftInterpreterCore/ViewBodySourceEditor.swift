@@ -3,6 +3,7 @@ import SwiftSyntax
 
 struct ViewStateDeclaration: Sendable {
     let name: String
+    let storageName: String
     let initializer: String
 }
 
@@ -80,9 +81,10 @@ struct ViewBodySourceEditor: Sendable {
             expression = "Group {\n\(children)\n}"
         }
 
+        let stateDeclarations = try viewStateDeclarations(in: typeDeclaration, typeName: typeName)
         return ExtractedViewBody(
-            expression: expression,
-            stateDeclarations: try viewStateDeclarations(in: typeDeclaration, typeName: typeName)
+            expression: try rewriteStateReferences(in: expression, declarations: stateDeclarations),
+            stateDeclarations: stateDeclarations
         )
     }
 
@@ -123,7 +125,11 @@ struct ViewBodySourceEditor: Sendable {
                     )
                 }
 
-                declarations.append(ViewStateDeclaration(name: name, initializer: source))
+                declarations.append(ViewStateDeclaration(
+                    name: name,
+                    storageName: stateStorageName(ownerTypeName: typeName, propertyName: name),
+                    initializer: source
+                ))
             }
         }
         return declarations
@@ -155,6 +161,51 @@ struct ViewBodySourceEditor: Sendable {
         return token
     }
 
+    private func rewriteStateReferences(
+        in expression: String,
+        declarations: [ViewStateDeclaration]
+    ) throws -> String {
+        guard !declarations.isEmpty else { return expression }
+
+        let syntaxTree = Parser.parse(source: expression)
+        guard !syntaxTree.hasError else {
+            throw RuntimeViewLoweringError.malformedSyntax
+        }
+
+        let replacementsByName = Dictionary(uniqueKeysWithValues: declarations.map {
+            ($0.name, $0.storageName)
+        })
+        let localBindings = StateLocalBindingVisitor()
+        localBindings.walk(syntaxTree)
+        if let shadowedName = localBindings.names.intersection(replacementsByName.keys).sorted().first {
+            throw RuntimeViewLoweringError.unsupportedExpression(
+                "view body shadows @State property \(shadowedName); rename the local binding"
+            )
+        }
+
+        let visitor = StateReferenceVisitor(replacementsByName: replacementsByName)
+        visitor.walk(syntaxTree)
+
+        var bytes = Array(expression.utf8)
+        for replacement in visitor.replacements.sorted(by: { $0.start > $1.start }) {
+            guard replacement.start <= replacement.end, replacement.end <= bytes.count else {
+                throw RuntimeViewLoweringError.malformedSyntax
+            }
+            bytes.replaceSubrange(replacement.start..<replacement.end, with: replacement.text.utf8)
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    private func stateStorageName(ownerTypeName: String, propertyName: String) -> String {
+        func hex(_ value: String) -> String {
+            let digits = Array("0123456789abcdef")
+            return value.utf8.map { byte in
+                String([digits[Int(byte >> 4)], digits[Int(byte & 0x0f)]])
+            }.joined()
+        }
+        return "__swiftpouch_state_\(hex(ownerTypeName))_\(hex(propertyName))"
+    }
+
     private func getterStatements(
         for binding: PatternBindingSyntax,
         typeName: String
@@ -177,5 +228,88 @@ struct ViewBodySourceEditor: Sendable {
             }
             return body.statements
         }
+    }
+}
+
+private struct StateReferenceReplacement {
+    let start: Int
+    let end: Int
+    let text: String
+}
+
+private final class StateLocalBindingVisitor: SyntaxVisitor {
+    private(set) var names = Set<String>()
+
+    init() {
+        super.init(viewMode: .sourceAccurate)
+    }
+
+    override func visit(_ node: IdentifierPatternSyntax) -> SyntaxVisitorContinueKind {
+        names.insert(node.identifier.text)
+        return .visitChildren
+    }
+}
+
+private final class StateReferenceVisitor: SyntaxVisitor {
+    private let replacementsByName: [String: String]
+    private(set) var replacements: [StateReferenceReplacement] = []
+
+    init(replacementsByName: [String: String]) {
+        self.replacementsByName = replacementsByName
+        super.init(viewMode: .sourceAccurate)
+    }
+
+    override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+        let rawName = node.baseName.text
+        let projectedPrefix: PrefixOperatorExprSyntax?
+        if let prefix = node.parent?.as(PrefixOperatorExprSyntax.self), prefix.operator.text == "$" {
+            projectedPrefix = prefix
+        } else {
+            projectedPrefix = nil
+        }
+        let isProjection = rawName.hasPrefix("$") || projectedPrefix != nil
+        guard let replacement = replacementsByName[propertyName(from: rawName)],
+              !isFunctionName(node) else {
+            return .visitChildren
+        }
+        let start = projectedPrefix?.positionAfterSkippingLeadingTrivia.utf8Offset
+            ?? node.positionAfterSkippingLeadingTrivia.utf8Offset
+        let end = projectedPrefix?.endPositionBeforeTrailingTrivia.utf8Offset
+            ?? node.endPositionBeforeTrailingTrivia.utf8Offset
+        replacements.append(StateReferenceReplacement(
+            start: start,
+            end: end,
+            text: isProjection ? "$\(replacement)" : replacement
+        ))
+        return .visitChildren
+    }
+
+    override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
+        guard let base = node.base?.as(DeclReferenceExprSyntax.self),
+              base.baseName.text == "self",
+              let replacement = replacementsByName[propertyName(from: node.declName.baseName.text)],
+              !isFunctionName(node) else {
+            return .visitChildren
+        }
+        let isProjection = node.declName.baseName.text.hasPrefix("$")
+            || node.trimmedDescription.contains(".$")
+        replacements.append(StateReferenceReplacement(
+            start: node.positionAfterSkippingLeadingTrivia.utf8Offset,
+            end: node.endPositionBeforeTrailingTrivia.utf8Offset,
+            text: isProjection ? "$\(replacement)" : replacement
+        ))
+        return .skipChildren
+    }
+
+    private func propertyName(from reference: String) -> String {
+        reference.hasPrefix("$") ? String(reference.dropFirst()) : reference
+    }
+
+    private func isFunctionName(_ node: some SyntaxProtocol) -> Bool {
+        guard let call = node.parent?.as(FunctionCallExprSyntax.self) else { return false }
+        return call.calledExpression.positionAfterSkippingLeadingTrivia.utf8Offset
+                == node.positionAfterSkippingLeadingTrivia.utf8Offset
+            && call.calledExpression.endPositionBeforeTrailingTrivia.utf8Offset
+                == node.endPositionBeforeTrailingTrivia.utf8Offset
     }
 }

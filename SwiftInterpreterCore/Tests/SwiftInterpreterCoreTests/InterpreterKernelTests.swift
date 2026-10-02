@@ -596,32 +596,94 @@ final class InterpreterKernelTests: XCTestCase {
         )
     }
 
-    func testCustomViewInputCanResolveAgainstStateInTheCurrentKernelScope() async throws {
+    func testCustomViewBindingReadsAndWritesTheParentStateCell() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let source = """
         struct HostView: View {
             @State private var isActive = true
 
             var body: some View {
-                StatusView(active: isActive)
+                StatusView(active: $isActive)
             }
         }
 
         struct StatusView: View {
-            let active: Bool
+            @Binding var active: Bool
 
             var body: some View {
-                if active { Text("Active") } else { Text("Paused") }
+                VStack {
+                    if active { Text("Active") } else { Text("Paused") }
+                    Button("Pause") { active = false }
+                }
             }
         }
         """
 
         let active = try await kernel.lowerViewBody(in: source, typeName: "HostView")
-        XCTAssertEqual(active, .text("Active"))
+        guard case .verticalStack(_, _, let activeChildren) = active,
+              activeChildren.count == 2,
+              case .button(_, let pauseActionID, _) = activeChildren[1] else {
+            return XCTFail("Expected the binding-backed child and Pause button")
+        }
+        XCTAssertEqual(activeChildren[0], .text("Active"))
 
-        _ = try await kernel.evaluate("isActive = false")
+        _ = try await kernel.performAction(pauseActionID)
         let paused = try await kernel.lowerViewBody(in: source, typeName: "HostView")
-        XCTAssertEqual(paused, .text("Paused"))
+        guard case .verticalStack(_, _, let pausedChildren) = paused,
+              pausedChildren.count == 2 else {
+            return XCTFail("Expected the refreshed binding-backed child")
+        }
+        XCTAssertEqual(pausedChildren[0], .text("Paused"))
+    }
+
+    func testBindingProjectionForwardsThroughCustomViewsToTheSameStateCell() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct HostView: View {
+            @State private var draft = "Initial"
+
+            var body: some View {
+                ForwardingView(text: $draft)
+            }
+        }
+
+        struct ForwardingView: View {
+            @Binding var text: String
+
+            var body: some View {
+                VStack {
+                    Text(text)
+                    EditingView(text: $text)
+                    EditingView(text: self.$text)
+                }
+            }
+        }
+
+        struct EditingView: View {
+            @Binding var text: String
+
+            var body: some View {
+                Button("Update") { self.text = "Updated" }
+            }
+        }
+        """
+
+        let initial = try await kernel.lowerViewBody(in: source, typeName: "HostView")
+        guard case .verticalStack(_, _, let initialChildren) = initial,
+              initialChildren.count == 3,
+              case .button(_, let updateActionID, _) = initialChildren[1],
+              case .button(_, _, _) = initialChildren[2] else {
+            return XCTFail("Expected both forwarded binding projections and Update buttons")
+        }
+        XCTAssertEqual(initialChildren[0], .text("Initial"))
+
+        _ = try await kernel.performAction(updateActionID)
+        let updated = try await kernel.lowerViewBody(in: source, typeName: "HostView")
+        guard case .verticalStack(_, _, let updatedChildren) = updated,
+              updatedChildren.count == 3 else {
+            return XCTFail("Expected the forwarded binding to rebuild the host view")
+        }
+        XCTAssertEqual(updatedChildren[0], .text("Updated"))
     }
 
     func testCustomViewTextInputRefreshesFromTheCurrentInterpreterScope() async throws {
@@ -720,29 +782,47 @@ final class InterpreterKernelTests: XCTestCase {
             @State private var caption = "Initial"
 
             var body: some View {
-                if isVisible {
-                    Text(caption)
-                } else {
-                    Text("Hidden")
+                VStack {
+                    if isVisible { Text(caption) } else { Text("Hidden") }
+                    Button("Change caption") { caption = "Changed" }
+                    Button("Hide") { isVisible = false }
                 }
             }
         }
         """
 
         let initial = try await kernel.lowerViewBody(in: source, typeName: "StateView")
-        XCTAssertEqual(initial, .text("Initial"))
+        guard case .verticalStack(_, _, let initialChildren) = initial,
+              initialChildren.count == 3,
+              case .button(_, let changeActionID, _) = initialChildren[1] else {
+            return XCTFail("Expected StateView controls alongside its state-backed text")
+        }
+        XCTAssertEqual(initialChildren[0], .text("Initial"))
 
-        _ = try await kernel.evaluate("caption = \"Changed\"")
+        _ = try await kernel.performAction(changeActionID)
         let changed = try await kernel.lowerViewBody(in: source, typeName: "StateView")
-        XCTAssertEqual(changed, .text("Changed"))
+        guard case .verticalStack(_, _, let changedChildren) = changed,
+              changedChildren.count == 3,
+              case .button(_, let hideActionID, _) = changedChildren[2] else {
+            return XCTFail("Expected refreshed StateView controls")
+        }
+        XCTAssertEqual(changedChildren[0], .text("Changed"))
 
-        _ = try await kernel.evaluate("isVisible = false")
+        _ = try await kernel.performAction(hideActionID)
         let hidden = try await kernel.lowerViewBody(in: source, typeName: "StateView")
-        XCTAssertEqual(hidden, .text("Hidden"))
+        guard case .verticalStack(_, _, let hiddenChildren) = hidden,
+              !hiddenChildren.isEmpty else {
+            return XCTFail("Expected the hidden StateView")
+        }
+        XCTAssertEqual(hiddenChildren[0], .text("Hidden"))
 
         await kernel.reset()
         let reset = try await kernel.lowerViewBody(in: source, typeName: "StateView")
-        XCTAssertEqual(reset, .text("Initial"))
+        guard case .verticalStack(_, _, let resetChildren) = reset,
+              !resetChildren.isEmpty else {
+            return XCTFail("Expected reset StateView")
+        }
+        XCTAssertEqual(resetChildren[0], .text("Initial"))
     }
 
     func testLowerViewBodyRejectsNonLiteralStateInitializers() async throws {
@@ -765,7 +845,7 @@ final class InterpreterKernelTests: XCTestCase {
         }
     }
 
-    func testLowerViewBodyRejectsStateNameCollisionsAcrossViewTypes() async throws {
+    func testLowerViewBodyKeepsSameNamedStateCellsIndependentAcrossViewTypes() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let firstSource = """
         struct FirstStateView {
@@ -787,15 +867,10 @@ final class InterpreterKernelTests: XCTestCase {
         let first = try await kernel.lowerViewBody(in: firstSource, typeName: "FirstStateView")
         XCTAssertEqual(first, .text("First"))
 
-        do {
-            _ = try await kernel.lowerViewBody(in: secondSource, typeName: "SecondStateView")
-            XCTFail("Expected same-named State properties to require separate view state")
-        } catch let error as RuntimeViewLoweringError {
-            guard case .unsupportedExpression(let detail) = error else {
-                return XCTFail("Expected a state scope diagnostic")
-            }
-            XCTAssertTrue(detail.contains("already initialized for FirstStateView"))
-        }
+        let second = try await kernel.lowerViewBody(in: secondSource, typeName: "SecondStateView")
+        XCTAssertEqual(second, .text("Hidden"))
+        let firstAgain = try await kernel.lowerViewBody(in: firstSource, typeName: "FirstStateView")
+        XCTAssertEqual(firstAgain, .text("First"))
     }
 
     func testDynamicConditionResolvesOnlyTheSelectedBranchAndItsText() async throws {
@@ -1012,9 +1087,13 @@ final class InterpreterKernelTests: XCTestCase {
         }
 
         _ = try await kernel.performAction(secondActionID)
-        let finalActiveState = try await kernel.evaluate("isActive")
+        let finalView = try await kernel.lowerViewBody(in: source, typeName: "ActionView")
         let updatedTapCount = try await kernel.evaluate("tapCount")
-        XCTAssertEqual(finalActiveState.value, "false")
+        guard case .verticalStack(_, _, let finalChildren) = finalView,
+              finalChildren.count == 2 else {
+            return XCTFail("Expected ActionView to rebuild after its second action")
+        }
+        XCTAssertEqual(finalChildren[0], .text("Inactive"))
         XCTAssertEqual(updatedTapCount.value, "1")
 
         await kernel.reset()
@@ -1109,7 +1188,10 @@ final class InterpreterKernelTests: XCTestCase {
         struct ReloadStateView {
             @State private var isVisible = true
             var body: some View {
-                if isVisible { Text("Visible") } else { Text("Hidden") }
+                VStack {
+                    if isVisible { Text("Visible") } else { Text("Hidden") }
+                    Button("Hide") { isVisible = false }
+                }
             }
         }
         """
@@ -1117,8 +1199,22 @@ final class InterpreterKernelTests: XCTestCase {
             in: stateViewSource,
             typeName: "ReloadStateView"
         )
-        XCTAssertEqual(initialStateBody, .text("Visible"))
-        _ = try await kernel.evaluate("isVisible = false")
+        guard case .verticalStack(_, _, let initialStateChildren) = initialStateBody,
+              initialStateChildren.count == 2,
+              case .button(_, let hideActionID, _) = initialStateChildren[1] else {
+            return XCTFail("Expected reload state view and Hide action")
+        }
+        XCTAssertEqual(initialStateChildren[0], .text("Visible"))
+        _ = try await kernel.performAction(hideActionID)
+        let hiddenStateBody = try await kernel.lowerViewBody(
+            in: stateViewSource,
+            typeName: "ReloadStateView"
+        )
+        guard case .verticalStack(_, _, let hiddenStateChildren) = hiddenStateBody,
+              !hiddenStateChildren.isEmpty else {
+            return XCTFail("Expected Hide action to update state before reload")
+        }
+        XCTAssertEqual(hiddenStateChildren[0], .text("Hidden"))
 
         try Data("let liveValue = 42\nliveValue".utf8).write(to: sourceURL, options: .atomic)
         let secondRun = try await kernel.reloadAndRun()
@@ -1127,7 +1223,11 @@ final class InterpreterKernelTests: XCTestCase {
             in: stateViewSource,
             typeName: "ReloadStateView"
         )
-        XCTAssertEqual(reloadedStateBody, .text("Visible"))
+        guard case .verticalStack(_, _, let reloadedStateChildren) = reloadedStateBody,
+              !reloadedStateChildren.isEmpty else {
+            return XCTFail("Expected state view after fresh interpreter reload")
+        }
+        XCTAssertEqual(reloadedStateChildren[0], .text("Visible"))
 
         let reopenedWorkspace = try ProjectWorkspaceStore(rootURL: workspaceRoot).workspace(for: projectID)
         let reopenedKernel = InterpreterKernel(workspace: reopenedWorkspace)

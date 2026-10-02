@@ -415,14 +415,14 @@ public actor InterpreterKernel {
         typeName: String
     ) async throws {
         for declaration in declarations {
-            if let owner = initializedViewStateOwners[declaration.name], owner != typeName {
+            if let owner = initializedViewStateOwners[declaration.storageName], owner != typeName {
                 throw RuntimeViewLoweringError.unsupportedExpression(
                     "State property \(declaration.name) is already initialized for \(owner)"
                 )
             }
         }
 
-        let pending = declarations.filter { initializedViewStateOwners[$0.name] == nil }
+        let pending = declarations.filter { initializedViewStateOwners[$0.storageName] == nil }
         guard !pending.isEmpty else {
             return
         }
@@ -459,9 +459,9 @@ public actor InterpreterKernel {
         typeName: String
     ) async throws {
         _ = try await interpreter.eval(
-            "var \(declaration.name) = \(declaration.initializer)"
+            "var \(declaration.storageName) = \(declaration.initializer)"
         )
-        initializedViewStateOwners[declaration.name] = typeName
+        initializedViewStateOwners[declaration.storageName] = typeName
     }
 
     private func resolveViewConditionalBranches(_ source: String) async throws -> ResolvedConditionalSource {
