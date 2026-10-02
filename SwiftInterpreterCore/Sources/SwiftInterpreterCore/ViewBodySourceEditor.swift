@@ -1,3 +1,4 @@
+import Foundation
 import SwiftParser
 import SwiftSyntax
 
@@ -278,21 +279,27 @@ struct ViewBodySourceEditor: Sendable {
     }
 
     private func qualifyScenePhaseCases(in expression: String) throws -> String {
-        let syntaxTree = Parser.parse(source: expression)
-        guard !syntaxTree.hasError else {
-            throw RuntimeViewLoweringError.malformedSyntax
-        }
+        let storage = NSRegularExpression.escapedPattern(for: scenePhaseStorageName)
+        let cases = "active|inactive|background"
+        let phaseOnRight = try NSRegularExpression(
+            pattern: "(\(storage)\\s*(?:==|!=)\\s*)\\.(\(cases))\\b"
+        )
+        let phaseOnLeft = try NSRegularExpression(
+            pattern: "\\.(\(cases))\\s*(==|!=)\\s*(\(storage))\\b"
+        )
 
-        let visitor = ScenePhaseCaseReferenceVisitor(storageName: scenePhaseStorageName)
-        visitor.walk(syntaxTree)
-        var bytes = Array(expression.utf8)
-        for replacement in visitor.replacements.sorted(by: { $0.start > $1.start }) {
-            guard replacement.start <= replacement.end, replacement.end <= bytes.count else {
-                throw RuntimeViewLoweringError.malformedSyntax
-            }
-            bytes.replaceSubrange(replacement.start..<replacement.end, with: replacement.text.utf8)
-        }
-        return String(decoding: bytes, as: UTF8.self)
+        let fullRange = NSRange(expression.startIndex..<expression.endIndex, in: expression)
+        let rightQualified = phaseOnRight.stringByReplacingMatches(
+            in: expression,
+            range: fullRange,
+            withTemplate: "$1__SwiftPouchScenePhase.$2"
+        )
+        let leftRange = NSRange(rightQualified.startIndex..<rightQualified.endIndex, in: rightQualified)
+        return phaseOnLeft.stringByReplacingMatches(
+            in: rightQualified,
+            range: leftRange,
+            withTemplate: "__SwiftPouchScenePhase.$1 $2 $3"
+        )
     }
 
     private func rewriteViewPropertyReferences(
@@ -461,47 +468,5 @@ private final class StateReferenceVisitor: SyntaxVisitor {
                 == node.positionAfterSkippingLeadingTrivia.utf8Offset
             && call.calledExpression.endPositionBeforeTrailingTrivia.utf8Offset
                 == node.endPositionBeforeTrailingTrivia.utf8Offset
-    }
-}
-
-private final class ScenePhaseCaseReferenceVisitor: SyntaxVisitor {
-    private let storageName: String
-    private(set) var replacements: [StateReferenceReplacement] = []
-    private let caseNames: Set<String> = ["active", "inactive", "background"]
-
-    init(storageName: String) {
-        self.storageName = storageName
-        super.init(viewMode: .sourceAccurate)
-    }
-
-    override func visit(_ node: InfixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
-        guard ["==", "!="].contains(node.operator.trimmedDescription) else {
-            return .visitChildren
-        }
-
-        if isScenePhaseStorage(node.leftOperand),
-           let phaseCase = node.rightOperand.as(MemberAccessExprSyntax.self) {
-            qualify(phaseCase)
-        } else if isScenePhaseStorage(node.rightOperand),
-                  let phaseCase = node.leftOperand.as(MemberAccessExprSyntax.self) {
-            qualify(phaseCase)
-        }
-        return .visitChildren
-    }
-
-    private func isScenePhaseStorage(_ expression: ExprSyntax) -> Bool {
-        expression.as(DeclReferenceExprSyntax.self)?.baseName.text == storageName
-    }
-
-    private func qualify(_ memberAccess: MemberAccessExprSyntax) {
-        guard case nil = memberAccess.base,
-              caseNames.contains(memberAccess.declName.baseName.text) else {
-            return
-        }
-        replacements.append(StateReferenceReplacement(
-            start: memberAccess.positionAfterSkippingLeadingTrivia.utf8Offset,
-            end: memberAccess.endPositionBeforeTrailingTrivia.utf8Offset,
-            text: "__SwiftPouchScenePhase.\(memberAccess.declName.baseName.text)"
-        ))
     }
 }
