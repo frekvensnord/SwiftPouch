@@ -540,33 +540,20 @@ public actor InterpreterKernel {
         _ conditional: ViewConditionalSite,
         activeBindings: [ViewConditionalBinding]
     ) async throws -> Bool {
-        var visibleBindings = activeBindings
-        for clause in conditional.clauses {
-            switch clause {
-            case .expression(let expression):
-                let scopedExpression = expressionWithOptionalBindings(
-                    expression,
-                    activeBindings: visibleBindings
-                )
-                let value = try await interpreter.eval(scopedExpression)
-                let displayValue = String(describing: value)
-                guard displayValue == "true" || displayValue == "false" else {
-                    throw RuntimeViewLoweringError.unsupportedExpression(
-                        "conditional expression is not Bool: \(expression)"
-                    )
-                }
-                guard displayValue == "true" else { return false }
-            case .optionalBinding(let binding):
-                let scopedInitializer = expressionWithOptionalBindings(
-                    binding.initializer,
-                    activeBindings: visibleBindings
-                )
-                let value = try await interpreter.eval(scopedInitializer)
-                guard String(describing: value) != "nil" else { return false }
-                visibleBindings.append(binding)
-            }
+        let conditionExpression = "if \(conditional.conditionSource) { true } else { false }"
+        let scopedExpression = expressionWithOptionalBindings(
+            conditionExpression,
+            fallback: "false",
+            activeBindings: activeBindings
+        )
+        let value = try await interpreter.eval(scopedExpression)
+        let displayValue = String(describing: value)
+        guard displayValue == "true" || displayValue == "false" else {
+            throw RuntimeViewLoweringError.unsupportedExpression(
+                "conditional expression is not Bool: \(conditional.conditionSource)"
+            )
         }
-        return true
+        return displayValue == "true"
     }
 
     private func resolveDynamicTextExpressions(
@@ -647,6 +634,7 @@ public actor InterpreterKernel {
             }
             let scopedExpression = expressionWithOptionalBindings(
                 site.expression,
+                fallback: "false",
                 activeBindings: activeBindings
             )
             let value = try await interpreter.eval(scopedExpression)
@@ -678,6 +666,7 @@ public actor InterpreterKernel {
             }
             let scopedExpression = expressionWithOptionalBindings(
                 site.expression,
+                fallback: "\"\"",
                 activeBindings: activeBindings
             )
             let value = try await interpreter.eval(scopedExpression)
@@ -725,10 +714,11 @@ public actor InterpreterKernel {
 
     private func expressionWithOptionalBindings(
         _ expression: String,
+        fallback: String,
         activeBindings: [ViewConditionalBinding]
     ) -> String {
-        guard !activeBindings.isEmpty else { return expression }
-        let declarations = activeBindings.map(\.declaration).joined(separator: "\n")
-        return "({\n\(declarations)\n\(expression)\n})()"
+        activeBindings.reversed().reduce(expression) { nestedExpression, binding in
+            "if let \(binding.name)\(binding.typeAnnotation) = \(binding.initializer) { \(nestedExpression) } else { \(fallback) }"
+        }
     }
 }
