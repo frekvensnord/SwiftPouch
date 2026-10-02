@@ -643,10 +643,7 @@ final class InterpreterKernelTests: XCTestCase {
             @State private var draft = "Initial"
 
             var body: some View {
-                VStack {
-                    Text(draft)
-                    ForwardingView(text: $draft)
-                }
+                ForwardingView(text: $draft)
             }
         }
 
@@ -654,7 +651,11 @@ final class InterpreterKernelTests: XCTestCase {
             @Binding var text: String
 
             var body: some View {
-                EditingView(text: self.$text)
+                VStack {
+                    Text(text)
+                    EditingView(text: $text)
+                    EditingView(text: self.$text)
+                }
             }
         }
 
@@ -669,16 +670,17 @@ final class InterpreterKernelTests: XCTestCase {
 
         let initial = try await kernel.lowerViewBody(in: source, typeName: "HostView")
         guard case .verticalStack(_, _, let initialChildren) = initial,
-              initialChildren.count == 2,
-              case .button(_, let updateActionID, _) = initialChildren[1] else {
-            return XCTFail("Expected the forwarded binding and Update button")
+              initialChildren.count == 3,
+              case .button(_, let updateActionID, _) = initialChildren[1],
+              case .button(_, _, _) = initialChildren[2] else {
+            return XCTFail("Expected both forwarded binding projections and Update buttons")
         }
         XCTAssertEqual(initialChildren[0], .text("Initial"))
 
         _ = try await kernel.performAction(updateActionID)
         let updated = try await kernel.lowerViewBody(in: source, typeName: "HostView")
         guard case .verticalStack(_, _, let updatedChildren) = updated,
-              updatedChildren.count == 2 else {
+              updatedChildren.count == 3 else {
             return XCTFail("Expected the forwarded binding to rebuild the host view")
         }
         XCTAssertEqual(updatedChildren[0], .text("Updated"))
