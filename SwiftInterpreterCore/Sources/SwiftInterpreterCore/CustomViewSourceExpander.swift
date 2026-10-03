@@ -272,7 +272,8 @@ struct CustomViewSourceExpander: Sendable {
                 )
             } else {
                 values[input.name] = CustomViewArgumentValue(
-                    expression: "(\(expression))",
+                    expression: isAtomicValueExpression(argument.expression)
+                        ? expression : "(\(expression))",
                     supportsProjection: false
                 )
             }
@@ -289,6 +290,21 @@ struct CustomViewSourceExpander: Sendable {
             return nil
         }
         return identifier
+    }
+
+    private func isAtomicValueExpression(_ expression: ExprSyntax) -> Bool {
+        expression.as(DeclReferenceExprSyntax.self) != nil
+            || expression.as(MemberAccessExprSyntax.self) != nil
+            || expression.as(FunctionCallExprSyntax.self) != nil
+            || expression.as(SubscriptCallExprSyntax.self) != nil
+            || expression.as(TupleExprSyntax.self) != nil
+            || expression.as(StringLiteralExprSyntax.self) != nil
+            || expression.as(BooleanLiteralExprSyntax.self) != nil
+            || expression.as(IntegerLiteralExprSyntax.self) != nil
+            || expression.as(FloatLiteralExprSyntax.self) != nil
+            || expression.as(NilLiteralExprSyntax.self) != nil
+            || expression.as(ArrayExprSyntax.self) != nil
+            || expression.as(DictionaryExprSyntax.self) != nil
     }
 
     private func substituting(

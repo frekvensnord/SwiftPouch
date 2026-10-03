@@ -732,6 +732,27 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(view, .text("True"))
     }
 
+    func testCustomViewLiteralInputRemainsStaticButtonTitle() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct HostView: View {
+            var body: some View { ActionView(title: "Continue") }
+        }
+        struct ActionView: View {
+            let title: String
+            var body: some View { Button(title) { print("tapped") } }
+        }
+        """
+
+        let view = try await kernel.lowerViewBody(in: source, typeName: "HostView")
+        guard case .button(let label, let actionID, _) = view else {
+            return XCTFail("Expected a button with the substituted title")
+        }
+        XCTAssertEqual(label, .text("Continue"))
+        let result = try await kernel.performAction(actionID)
+        XCTAssertEqual(result.standardOutput, "tapped\n")
+    }
+
     func testCustomViewBindingReadsAndWritesTheParentStateCell() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let source = """
