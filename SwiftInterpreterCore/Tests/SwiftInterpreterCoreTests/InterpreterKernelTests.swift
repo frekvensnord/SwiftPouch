@@ -1446,6 +1446,69 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(refreshedChildren[0], .text("Changed"))
     }
 
+    func testFailedAppReloadRetainsThePreviousStateAndActions() async throws {
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SwiftInterpreterFailedReloadTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+
+        let sourceURL = temporaryRoot.appendingPathComponent("PreviewApp.swift")
+        let workspace = try ProjectWorkspaceStore(
+            rootURL: temporaryRoot.appendingPathComponent("Workspaces", isDirectory: true)
+        ).workspace(for: ProjectID())
+        let kernel = InterpreterKernel(workspace: workspace)
+        let validSource = """
+        import SwiftUI
+        @main struct PreviewApp: App {
+            var body: some Scene { WindowGroup { PreviewView() } }
+        }
+        struct PreviewView: View {
+            @State private var title = "Initial"
+            var body: some View {
+                VStack {
+                    Text(title)
+                    Button("Change") { title = "Changed" }
+                }
+            }
+        }
+        """
+        try Data(validSource.utf8).write(to: sourceURL)
+        _ = try await kernel.linkSourceFile(at: sourceURL)
+        let first = try await kernel.reloadAndRunApp()
+        guard case .verticalStack(_, _, let children) = first.rootView,
+              children.count == 2,
+              case .button(_, let actionID, _) = children[1] else {
+            return XCTFail("Expected a stateful app with a button")
+        }
+        _ = try await kernel.performAction(actionID)
+
+        let invalidSource = validSource.replacingOccurrences(
+            of: "Text(title)",
+            with: "Menu { Text(title) }"
+        )
+        try Data(invalidSource.utf8).write(to: sourceURL, options: .atomic)
+        do {
+            _ = try await kernel.reloadAndRunApp()
+            XCTFail("Unsupported view must fail the attempted reload")
+        } catch {
+            // The previously displayed generation must remain usable.
+        }
+
+        let restored = try await kernel.refreshAppView(first)
+        guard case .verticalStack(_, _, let restoredChildren) = restored.rootView else {
+            return XCTFail("Expected the original view after the failed reload")
+        }
+        XCTAssertEqual(restoredChildren[0], .text("Changed"))
+        _ = try await kernel.performAction(actionID)
+
+        try Data(validSource.utf8).write(to: sourceURL, options: .atomic)
+        let successfulReload = try await kernel.reloadAndRunApp()
+        guard case .verticalStack(_, _, let freshChildren) = successfulReload.rootView else {
+            return XCTFail("Expected the new session after a successful reload")
+        }
+        XCTAssertEqual(freshChildren[0], .text("Initial"))
+    }
+
     func testAppViewReceivesHostScenePhaseOnReloadAndRefresh() async throws {
         let temporaryRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("SwiftInterpreterScenePhaseTests-\(UUID().uuidString)", isDirectory: true)

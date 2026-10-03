@@ -361,12 +361,31 @@ public actor InterpreterKernel {
         }.value
         let entryPoint = try appEntryPointSourceExtractor.extract(from: sourceSnapshot.source)
 
+        let previousInterpreter = interpreter
+        let previousOptionalVariableTypes = optionalVariableTypes
+        let previousStateOwners = initializedViewStateOwners
+        let previousActions = registeredRuntimeActions
+        let previousScenePhase = currentScenePhase
+        let previousInterpreterScenePhase = interpreterScenePhase
+        let previousDismissBridgeInstalled = interpreterDismissBridgeInstalled
         resetInterpreterScope()
         currentScenePhase = scenePhase
-        let rootView = try await lowerViewBodyInCurrentScope(
-            in: sourceSnapshot.source,
-            typeName: entryPoint.rootViewTypeName
-        )
+        let rootView: RuntimeViewNode
+        do {
+            rootView = try await lowerViewBodyInCurrentScope(
+                in: sourceSnapshot.source,
+                typeName: entryPoint.rootViewTypeName
+            )
+        } catch {
+            interpreter = previousInterpreter
+            optionalVariableTypes = previousOptionalVariableTypes
+            initializedViewStateOwners = previousStateOwners
+            registeredRuntimeActions = previousActions
+            currentScenePhase = previousScenePhase
+            interpreterScenePhase = previousInterpreterScenePhase
+            interpreterDismissBridgeInstalled = previousDismissBridgeInstalled
+            throw error
+        }
         return InterpretedAppViewSnapshot(
             sourceSnapshot: sourceSnapshot,
             entryPoint: entryPoint,

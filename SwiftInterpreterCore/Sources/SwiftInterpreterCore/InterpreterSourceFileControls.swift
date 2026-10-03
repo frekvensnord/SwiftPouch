@@ -138,7 +138,6 @@ public struct InterpreterSourceFileControls: View {
     private func reloadAndRun() async {
         isWorking = true
         errorMessage = nil
-        appViewSnapshot = nil
         pendingScenePhase = nil
 
         do {
