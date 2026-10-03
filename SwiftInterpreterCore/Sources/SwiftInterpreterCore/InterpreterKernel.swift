@@ -1174,10 +1174,7 @@ public actor InterpreterKernel {
                     let value: Value
                     switch site.source {
                     case .state(let name):
-                        guard let binding = self.interpreter.rootScope.lookup(name) else {
-                            throw RuntimeViewLoweringError.unsupportedArgument("input references unknown state \(name)")
-                        }
-                        value = binding.value
+                        value = try await self.inputStateValue(name)
                     case .computed(let getter, _):
                         value = try await self.evaluateViewExpression(
                             getter,
@@ -1201,6 +1198,13 @@ public actor InterpreterKernel {
             _ = await output.readAllString()
             throw error
         }
+    }
+
+    private func inputStateValue(_ name: String) throws -> Value {
+        guard let binding = interpreter.rootScope.lookup(name) else {
+            throw RuntimeViewLoweringError.unsupportedArgument("input references unknown state \(name)")
+        }
+        return binding.value
     }
 
     private func evaluateDynamicBooleanModifierArguments(

@@ -330,9 +330,11 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     }
 
     private func stringValue(_ expression: ExprSyntax, viewName: String) throws -> String {
-        resolvedDynamicStringSites[expression.positionAfterSkippingLeadingTrivia.utf8Offset]
-            ?? resolvedDynamicStrings[expression.trimmedDescription]
-            ?? (try staticString(expression, viewName: viewName))
+        if let value = resolvedDynamicStringSites[expression.positionAfterSkippingLeadingTrivia.utf8Offset]
+            ?? resolvedDynamicStrings[expression.trimmedDescription] {
+            return value
+        }
+        return try staticString(expression, viewName: viewName)
     }
 
     private func lowerTextField(_ call: FunctionCallExprSyntax) throws -> RuntimeViewNode {
