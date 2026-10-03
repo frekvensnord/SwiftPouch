@@ -110,6 +110,19 @@ Support the target's actual forms of `TextField`, `Picker`, `Menu`, `Form`,
 **Done when:** composing, model and reasoning selection, and settings are
 operable, with edits flowing back into app state through bindings.
 
+**Step 30 implementation:** The renderer and interpreter now connect native
+`TextField` (including vertical input and submit), `Picker`, `Menu`, `Form`,
+`Section`, dynamic labels and tags, and supported Button callbacks. Direct
+`$state` and forwarded `@Binding` String projections write to the same
+interpreter cell. A `Binding(get:set:)` picker reads its current String and
+executes its setter when the native selection changes. Composer edits are
+collected briefly, and a button action flushes pending edits before it runs.
+The core tests exercise composing and submit, dynamic model menu actions,
+reasoning choices, form lowering, and state refresh. The unchanged full target
+file still depends on the deferred observable-object bridge and the later
+navigation, event, Foundation, and service steps; this control slice does not
+claim that the entire target app can already run.
+
 ## Step 31 — Add navigation, presentations, and view events
 
 Implement `NavigationStack`, toolbar components, sheets including item-based

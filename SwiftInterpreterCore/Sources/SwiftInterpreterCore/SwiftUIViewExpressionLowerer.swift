@@ -1640,8 +1640,15 @@ func isInsideButtonActionClosure(_ node: some SyntaxProtocol) -> Bool {
 
     while let current = ancestor {
         if let call = current.as(FunctionCallExprSyntax.self),
-           call.calledExpression.trimmedDescription == "Button",
-           let action = buttonActionClosure(in: call) {
+           let action: ClosureExprSyntax = {
+               if call.calledExpression.trimmedDescription == "Button" {
+                   return buttonActionClosure(in: call)
+               }
+               if call.calledExpression.as(MemberAccessExprSyntax.self)?.declName.baseName.text == "onSubmit" {
+                   return call.trailingClosure
+               }
+               return nil
+           }() {
             let actionStart = action.positionAfterSkippingLeadingTrivia.utf8Offset
             let actionEnd = action.endPositionBeforeTrailingTrivia.utf8Offset
             if nodeStart >= actionStart && nodeEnd <= actionEnd {

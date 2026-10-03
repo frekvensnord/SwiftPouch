@@ -139,6 +139,31 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(updatedLabel, .text("Modell B"))
     }
 
+    func testTextFieldOnSubmitKeepsItsConditionalInsideTheAction() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct ComposerView: View {
+            @State private var draft = ""
+            var body: some View {
+                TextField("Nachricht", text: $draft).onSubmit {
+                    if !draft.isEmpty { draft = "" }
+                }
+            }
+        }
+        """
+        let first = try await kernel.lowerViewBody(in: source, typeName: "ComposerView")
+        guard case .modified(content: .textField(_, _, let inputID, _), modifier: .onSubmit(let actionID)) = first else {
+            return XCTFail("Expected submit action attached to the text field")
+        }
+        try await kernel.setInput(inputID, to: "Nachricht")
+        _ = try await kernel.performAction(actionID)
+        let refreshed = try await kernel.lowerViewBody(in: source, typeName: "ComposerView")
+        guard case .modified(content: .textField(_, let value, _, _), modifier: .onSubmit) = refreshed else {
+            return XCTFail("Expected refreshed text field")
+        }
+        XCTAssertEqual(value, "")
+    }
+
     func testEvaluatesSwiftExpression() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let result = try await kernel.evaluate("1 + 2 * 3")
