@@ -90,11 +90,17 @@ produce an updated row tree without reparsing or reselecting the data source.
 
 ### Step 29.2 — Scrolling and lazy-list containers
 
-Add `ScrollView`, `LazyVStack`, `ScrollViewReader`, and a host-backed scroll
-proxy that can target stable row IDs.
+Implemented: `ScrollView`, `LazyVStack`, and `ScrollViewReader` lower into
+portable nodes rendered by their native SwiftUI counterparts. `.id(value)`
+uses the same type-tagged identity as `ForEach` rows. Direct `proxy.scrollTo`
+calls in interpreted button actions carry reader, target, and optional anchor
+to the host after the view refresh; the matching native reader performs the
+scroll. Collection changes rebuild lazy rows with their existing stable IDs.
 
-**Done when:** message, history, model, and reasoning rows can appear in their
-target containers and the chat view can scroll to its latest message.
+The target chat's `proxy.scrollTo` calls occur inside `.onChange`, whose event
+callbacks belong to Step 31. Live `ChatStore`/`CodexSessionManager` observation
+also remains an explicit prerequisite for target-sourced rows; Step 29.2
+provides their scroll containers and proxy route.
 
 ## Step 30 — Add inputs and controls
 

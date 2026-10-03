@@ -546,5 +546,14 @@ let bindings in view-expression snapshots. Step 15 handles dynamic Boolean
   for its button actions.
 - This is collection lowering, not the pending observation bridge: direct
   `ChatStore` and `CodexSessionManager` updates still require the
-  `@StateObject`/`@ObservedObject`/`@Published` integration. Scroll containers
-  and programmatic scrolling remain in Step 29.2.
+  `@StateObject`/`@ObservedObject`/`@Published` integration.
+
+### Step 29.2 — Native scrolling and lazy stacks
+
+`ScrollView`, `LazyVStack`, and `ScrollViewReader` lower into portable nodes
+and render with native SwiftUI scrolling. Identified `ForEach` rows retain
+their IDs inside lazy stacks, and `.id(value)` creates matching stable scroll
+targets. A direct `proxy.scrollTo(id, anchor: .bottom)` call in an interpreted
+button action is delivered to the matching host reader after refresh. The
+target app places its scroll calls in `.onChange`; those callbacks are Step 31,
+while direct model observation is still a separate pending bridge.
