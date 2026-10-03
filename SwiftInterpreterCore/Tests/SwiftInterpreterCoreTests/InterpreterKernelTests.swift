@@ -107,6 +107,38 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(value, "")
     }
 
+    func testMenuModelButtonsUseDynamicTitlesAndCaptureTheirRowActions() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var selected = \"Automatisch\"; let models = [\"Modell A\", \"Modell B\"]")
+        let source = """
+        Menu {
+            ForEach(models, id: \\.self) { model in
+                Button(model) { selected = model }
+            }
+        } label: {
+            Text(selected)
+        }
+        """
+        let initial = try await kernel.lowerViewExpression(source)
+        guard case .menu(let label, .forEach(let rows)) = initial,
+              rows.count == 2,
+              case .button(let firstTitle, _, _) = rows[0].content,
+              case .button(let secondTitle, let secondID, _) = rows[1].content else {
+            return XCTFail("Expected two dynamic model buttons")
+        }
+        XCTAssertEqual(label, .text("Automatisch"))
+        XCTAssertEqual(firstTitle, .text("Modell A"))
+        XCTAssertEqual(secondTitle, .text("Modell B"))
+        _ = try await kernel.performAction(secondID)
+        let selected = try await kernel.evaluate("selected")
+        XCTAssertEqual(selected.value, "Modell B")
+        let refreshed = try await kernel.lowerViewExpression(source)
+        guard case .menu(let updatedLabel, _) = refreshed else {
+            return XCTFail("Expected refreshed model menu")
+        }
+        XCTAssertEqual(updatedLabel, .text("Modell B"))
+    }
+
     func testEvaluatesSwiftExpression() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let result = try await kernel.evaluate("1 + 2 * 3")

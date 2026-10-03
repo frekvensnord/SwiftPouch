@@ -22,6 +22,8 @@ public struct InterpreterSourceFileControls: View {
     @State private var isFileImporterPresented = false
     @State private var isWorking = false
     @State private var pendingScenePhase: RuntimeScenePhase?
+    @State private var pendingInputChanges: [RuntimeInputID: String] = [:]
+    @State private var inputCommitTask: Task<Void, Never>?
 
     public init(kernel: InterpreterKernel) {
         self.kernel = kernel
@@ -76,7 +78,7 @@ public struct InterpreterSourceFileControls: View {
                             await performAction(actionID, in: appViewSnapshot)
                         },
                         onInput: { inputID, value in
-                            Task { await setInput(inputID, to: value, in: appViewSnapshot) }
+                            queueInput(inputID, value: value)
                         }
                     )
                     .disabled(isWorking)
@@ -143,6 +145,8 @@ public struct InterpreterSourceFileControls: View {
 
     private func reloadAndRun() async {
         isWorking = true
+        inputCommitTask?.cancel()
+        pendingInputChanges.removeAll()
         errorMessage = nil
         pendingScenePhase = nil
 
@@ -164,10 +168,12 @@ public struct InterpreterSourceFileControls: View {
     ) async -> Bool {
         guard !isWorking else { return false }
         isWorking = true
+        inputCommitTask?.cancel()
         errorMessage = nil
 
         var requestsHostDismissal = false
         do {
+            try await writePendingInputs()
             let result = try await kernel.performAction(actionID)
             appViewSnapshot = try await kernel.refreshAppView(
                 snapshot,
@@ -183,16 +189,31 @@ public struct InterpreterSourceFileControls: View {
         return requestsHostDismissal
     }
 
-    private func setInput(
-        _ inputID: RuntimeInputID,
-        to value: String,
-        in snapshot: InterpretedAppViewSnapshot
-    ) async {
-        guard !isWorking else { return }
+    private func queueInput(_ inputID: RuntimeInputID, value: String) {
+        pendingInputChanges[inputID] = value
+        inputCommitTask?.cancel()
+        inputCommitTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            await commitPendingInputs()
+        }
+    }
+
+    private func writePendingInputs() async throws {
+        let changes = pendingInputChanges
+        pendingInputChanges.removeAll()
+        for (id, value) in changes {
+            try await kernel.setInput(id, to: value)
+        }
+    }
+
+    private func commitPendingInputs() async {
+        guard !isWorking, !pendingInputChanges.isEmpty,
+              let snapshot = appViewSnapshot else { return }
         isWorking = true
         errorMessage = nil
         do {
-            try await kernel.setInput(inputID, to: value)
+            try await writePendingInputs()
             appViewSnapshot = try await kernel.refreshAppView(
                 snapshot,
                 scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
@@ -206,6 +227,8 @@ public struct InterpreterSourceFileControls: View {
 
     private func unlinkFile() async {
         isWorking = true
+        inputCommitTask?.cancel()
+        pendingInputChanges.removeAll()
         errorMessage = nil
         appViewSnapshot = nil
         scrollRequest = nil
