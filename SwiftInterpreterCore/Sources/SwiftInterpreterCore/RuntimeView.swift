@@ -528,7 +528,11 @@ public struct SwiftUIRuntimeRenderer: View {
         case .onSubmit(let actionID):
             render(content).onSubmit { dispatchAction(actionID) }
         case .textInputAutocapitalizationNever:
+            #if os(iOS)
             render(content).textInputAutocapitalization(.never)
+            #else
+            render(content)
+            #endif
         case .autocorrectionDisabled(let value):
             render(content).autocorrectionDisabled(value)
         case .id(let id):
