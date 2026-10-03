@@ -3,6 +3,40 @@ import XCTest
 @testable import SwiftInterpreterCore
 
 final class RuntimeViewTests: XCTestCase {
+    func testLowererBuildsNativeInputAndSelectionContainers() throws {
+        let view = try SwiftUIViewExpressionLowerer().lowerRecordingActions("""
+        Form {
+            Section("Modell") {
+                TextField("Eigene Modell-ID", text: $manualModelID, axis: .vertical)
+                    .submitLabel(.send)
+                Picker("Stufe", selection: $reasoning) {
+                    Text("Automatisch").tag("auto")
+                    Text("Hoch").tag("high")
+                }
+                Menu {
+                    Button("Automatisch") { print("auto") }
+                } label: {
+                    Label("Modell", systemImage: "chevron.down")
+                }
+            }
+        }
+        """)
+        guard case .form(.section(let title, .group(let children))) = view.node,
+              children.count == 3,
+              case .modified(content: .textField(let placeholder, _, let textID, let axis), modifier: .submitLabelSend) = children[0],
+              case .picker(_, _, let pickerID, _) = children[1],
+              case .menu(let label, _) = children[2] else {
+            return XCTFail("Expected native form, picker, menu and text field nodes")
+        }
+        XCTAssertEqual(title, "Modell")
+        XCTAssertEqual(placeholder, "Eigene Modell-ID")
+        XCTAssertEqual(axis, .vertical)
+        XCTAssertEqual(label, .label(title: "Modell", systemName: "chevron.down"))
+        XCTAssertNotNil(view.inputs[textID])
+        XCTAssertNotNil(view.inputs[pickerID])
+        XCTAssertEqual(view.actions.count, 1)
+    }
+
     func testViewTreeRoundTripsThroughCodable() throws {
         let actionID = RuntimeActionID()
         let tree = RuntimeViewNode.verticalStack(
@@ -96,7 +130,7 @@ final class RuntimeViewTests: XCTestCase {
             XCTAssertEqual(error as? RuntimeViewLoweringError, .invalidLiteral("Text"))
         }
         XCTAssertThrowsError(try lowerer.lower("Menu { Text(\"Run\") }")) { error in
-            XCTAssertEqual(error as? RuntimeViewLoweringError, .unsupportedView("Menu"))
+            XCTAssertEqual(error as? RuntimeViewLoweringError, .unsupportedArgument("Menu"))
         }
     }
 
@@ -350,7 +384,7 @@ final class RuntimeViewTests: XCTestCase {
         XCTAssertThrowsError(
             try lowerer.lower("if true { Text(\"shown\") } else { Menu { Text(\"unsupported\") } }")
         ) { error in
-            XCTAssertEqual(error as? RuntimeViewLoweringError, .unsupportedView("Menu"))
+            XCTAssertEqual(error as? RuntimeViewLoweringError, .unsupportedArgument("Menu"))
         }
     }
 

@@ -74,6 +74,9 @@ public struct InterpreterSourceFileControls: View {
                         scrollRequest: scrollRequest,
                         onActionWithDismissal: { actionID in
                             await performAction(actionID, in: appViewSnapshot)
+                        },
+                        onInput: { inputID, value in
+                            Task { await setInput(inputID, to: value, in: appViewSnapshot) }
                         }
                     )
                     .disabled(isWorking)
@@ -178,6 +181,27 @@ public struct InterpreterSourceFileControls: View {
         isWorking = false
         await refreshPendingScenePhaseIfPossible()
         return requestsHostDismissal
+    }
+
+    private func setInput(
+        _ inputID: RuntimeInputID,
+        to value: String,
+        in snapshot: InterpretedAppViewSnapshot
+    ) async {
+        guard !isWorking else { return }
+        isWorking = true
+        errorMessage = nil
+        do {
+            try await kernel.setInput(inputID, to: value)
+            appViewSnapshot = try await kernel.refreshAppView(
+                snapshot,
+                scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isWorking = false
+        await refreshPendingScenePhaseIfPossible()
     }
 
     private func unlinkFile() async {

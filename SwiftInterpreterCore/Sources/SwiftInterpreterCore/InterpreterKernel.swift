@@ -85,6 +85,7 @@ public actor InterpreterKernel {
     private var optionalVariableTypes: [String: String] = [:]
     private var initializedViewStateOwners: [String: String] = [:]
     private var registeredRuntimeActions: [RuntimeActionID: RuntimeActionRegistration] = [:]
+    private var registeredRuntimeInputs: [RuntimeInputID: RuntimeInputSource] = [:]
     private let forEachTemporaryPrefix = "__swiftpouch_runtime_foreach_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
     private var currentScenePhase: RuntimeScenePhase = .active
     private var interpreterScenePhase: RuntimeScenePhase?
@@ -141,16 +142,18 @@ public actor InterpreterKernel {
         let dynamicConditions = try viewExpressionLowerer.dynamicBooleanConditions(in: source)
         let dynamicDisabledExpressions = try viewExpressionLowerer.dynamicBooleanModifierArguments(in: source)
         let allScrollIDSites = try viewExpressionLowerer.scrollIDExpressionSites(in: source)
+        let inputSites = try viewExpressionLowerer.inputSites(in: source)
         guard !allTextSites.isEmpty
                 || !dynamicConditions.isEmpty
                 || !dynamicDisabledExpressions.isEmpty
                 || !allScrollIDSites.isEmpty
-                || containsForEach else {
+                || containsForEach || !inputSites.isEmpty else {
             let loweredView = try viewExpressionLowerer.lowerRecordingActions(source)
             if let stateTypeName {
                 try await seedViewStateDeclarations(stateDeclarations, typeName: stateTypeName)
             }
             registeredRuntimeActions = loweredView.actions
+            registeredRuntimeInputs = loweredView.inputs
             return loweredView.node
         }
 
@@ -223,6 +226,7 @@ public actor InterpreterKernel {
         let selectedTextSites = try viewExpressionLowerer.dynamicStringExpressionSites(in: selectedSource)
         let selectedDisabledSites = try viewExpressionLowerer.dynamicBooleanModifierArgumentSites(in: selectedSource)
         let selectedScrollIDSites = try viewExpressionLowerer.scrollIDExpressionSites(in: selectedSource)
+        let selectedInputSites = try viewExpressionLowerer.inputSites(in: selectedSource)
 
         let resolvedStringSites: [Int: String]
         if selectedTextSites.isEmpty {
@@ -253,6 +257,7 @@ public actor InterpreterKernel {
             selectedScrollIDSites,
             bindingScopes: bindingScopes
         )
+        let resolvedInputValues = try await resolveInputValues(selectedInputSites, bindingScopes: bindingScopes)
 
         let loweredView = try SwiftUIViewExpressionLowerer(
             resolvedDynamicStrings: [:],
@@ -260,9 +265,11 @@ public actor InterpreterKernel {
             resolvedDynamicStringSites: resolvedStringSites,
             resolvedDynamicBooleanSites: resolvedDisabledSites,
             resolvedScrollIDSites: resolvedScrollIDSites,
-            forEachBindingsByActionOffset: actionBindings
+            forEachBindingsByActionOffset: actionBindings,
+            resolvedInputValues: resolvedInputValues
         ).lowerRecordingActions(selectedSource)
         registeredRuntimeActions = loweredView.actions
+        registeredRuntimeInputs = loweredView.inputs
         return loweredView.node
     }
 
@@ -383,6 +390,7 @@ public actor InterpreterKernel {
         let previousOptionalVariableTypes = optionalVariableTypes
         let previousStateOwners = initializedViewStateOwners
         let previousActions = registeredRuntimeActions
+        let previousInputs = registeredRuntimeInputs
         let previousScenePhase = currentScenePhase
         let previousInterpreterScenePhase = interpreterScenePhase
         let previousDismissBridgeInstalled = interpreterDismissBridgeInstalled
@@ -399,6 +407,7 @@ public actor InterpreterKernel {
             optionalVariableTypes = previousOptionalVariableTypes
             initializedViewStateOwners = previousStateOwners
             registeredRuntimeActions = previousActions
+            registeredRuntimeInputs = previousInputs
             currentScenePhase = previousScenePhase
             interpreterScenePhase = previousInterpreterScenePhase
             interpreterDismissBridgeInstalled = previousDismissBridgeInstalled
@@ -484,6 +493,28 @@ public actor InterpreterKernel {
         )
     }
 
+    /// Writes a native text or picker change into the currently rendered app state.
+    public func setInput(_ inputID: RuntimeInputID, to value: String) async throws {
+        await acquireEvaluationSlot()
+        defer { releaseEvaluationSlot() }
+        guard let source = registeredRuntimeInputs[inputID] else {
+            throw RuntimeViewLoweringError.unsupportedArgument("unknown input binding")
+        }
+        switch source {
+        case .state(let name):
+            guard case .string = interpreter.rootScope.lookup(name)?.value,
+                  interpreter.rootScope.assign(name, value: .string(value)) else {
+                throw RuntimeViewLoweringError.unsupportedArgument("input must bind to a mutable String state")
+            }
+        case .computed(_, let setter):
+            let name = "__swiftpouch_input_payload"
+            interpreter.rootScope.bind(name, value: .string(value), mutable: false)
+            defer { interpreter.rootScope.bind(name, value: .void, mutable: false) }
+            let body = setter.replacingOccurrences(of: "$0", with: "__swiftpouch_input_value")
+            _ = try await evaluateLocked("({ __swiftpouch_input_value in \(body) })(\(name))", resetInterpreter: false)
+        }
+    }
+
     private func consumeScrollRequest() throws -> RuntimeScrollRequest? {
         guard case .bool(true) = interpreter.rootScope.lookup("__swiftpouch_scroll_requested")?.value,
               case .string(let readerID) = interpreter.rootScope.lookup("__swiftpouch_scroll_reader")?.value,
@@ -566,6 +597,7 @@ public actor InterpreterKernel {
         optionalVariableTypes.removeAll()
         initializedViewStateOwners.removeAll()
         registeredRuntimeActions.removeAll()
+        registeredRuntimeInputs.removeAll()
         interpreterScenePhase = nil
         interpreterDismissBridgeInstalled = false
     }
@@ -1115,6 +1147,55 @@ public actor InterpreterKernel {
             output.finish()
             _ = await output.readAllString()
             return ids
+        } catch {
+            output.finish()
+            _ = await output.readAllString()
+            throw error
+        }
+    }
+
+    private func resolveInputValues(
+        _ sites: [RuntimeInputSite],
+        bindingScopes: [ActiveBindingScope]
+    ) async throws -> [Int: String] {
+        guard !sites.isEmpty else { return [:] }
+        let output = OutputSink()
+        let path = workspace.rootURL.path
+        let shell = Shell(
+            stdout: output,
+            environment: Environment(variables: ["HOME": path, "PWD": path]),
+            sandbox: Sandbox.rooted(at: workspace.rootURL, allowedHosts: []),
+            hostInfo: .synthetic
+        )
+        do {
+            let resolved = try await shell.withCurrent { @Sendable in
+                var values: [Int: String] = [:]
+                for site in sites {
+                    let value: Value
+                    switch site.source {
+                    case .state(let name):
+                        guard let binding = self.interpreter.rootScope.lookup(name) else {
+                            throw RuntimeViewLoweringError.unsupportedArgument("input references unknown state \(name)")
+                        }
+                        value = binding.value
+                    case .computed(let getter, _):
+                        value = try await self.evaluateViewExpression(
+                            getter,
+                            fallback: "\"\"",
+                            activeBindings: self.activeBindings(at: site.offset, in: bindingScopes),
+                            forEachBindings: self.activeForEachBindings(at: site.offset, in: bindingScopes)
+                        )
+                    }
+                    guard case .string(let text) = value else {
+                        throw RuntimeViewLoweringError.unsupportedArgument("input selection must be String")
+                    }
+                    values[site.offset] = text
+                }
+                return values
+            }
+            output.finish()
+            _ = await output.readAllString()
+            return resolved
         } catch {
             output.finish()
             _ = await output.readAllString()

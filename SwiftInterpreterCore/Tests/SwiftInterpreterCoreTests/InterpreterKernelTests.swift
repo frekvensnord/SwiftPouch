@@ -3,6 +3,110 @@ import XCTest
 @testable import SwiftInterpreterCore
 
 final class InterpreterKernelTests: XCTestCase {
+    func testTextFieldAndPickerWriteThroughBindingAndRefreshState() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct InputView: View {
+            @State private var draft = ""
+            @State private var reasoning = "auto"
+
+            var body: some View {
+                Form {
+                    Section("Eingaben") {
+                        TextField("Nachricht schreiben", text: $draft, axis: .vertical)
+                        Text(draft)
+                        Picker("Stufe", selection: $reasoning) {
+                            Text("Automatisch").tag("auto")
+                            Text("Hoch").tag("high")
+                        }
+                        Text(reasoning)
+                    }
+                }
+            }
+        }
+        """
+        let first = try await kernel.lowerViewBody(in: source, typeName: "InputView")
+        guard case .form(.section(_, .group(let children))) = first,
+              case .textField(_, let draft, let textID, _) = children[0],
+              case .picker(_, let selection, let pickerID, _) = children[2] else {
+            return XCTFail("Expected bound inputs")
+        }
+        XCTAssertEqual(draft, "")
+        XCTAssertEqual(selection, "auto")
+        try await kernel.setInput(textID, to: "Hallo")
+        try await kernel.setInput(pickerID, to: "high")
+
+        let refreshed = try await kernel.lowerViewBody(in: source, typeName: "InputView")
+        guard case .form(.section(_, .group(let updated))) = refreshed,
+              case .textField(_, let updatedDraft, _, _) = updated[0],
+              case .picker(_, let updatedSelection, _, _) = updated[2] else {
+            return XCTFail("Expected refreshed bound inputs")
+        }
+        XCTAssertEqual(updatedDraft, "Hallo")
+        XCTAssertEqual(updated[1], .text("Hallo"))
+        XCTAssertEqual(updatedSelection, "high")
+        XCTAssertEqual(updated[3], .text("high"))
+    }
+
+    func testComputedPickerBindingRunsSetterAndDynamicChoiceTags() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var selected = \"auto\"; let levels = [\"low\", \"high\"]")
+        let source = """
+        Picker("Stufe", selection: Binding(get: { selected }, set: { selected = $0 })) {
+            Text("Automatisch").tag("auto")
+            ForEach(levels, id: \\.self) { level in
+                Text(level.capitalized).tag(level)
+            }
+        }
+        """
+        let first = try await kernel.lowerViewExpression(source)
+        guard case .picker(_, let original, let inputID, let content) = first,
+              case .group(let choices) = content,
+              case .forEach(let rows) = choices[1] else {
+            return XCTFail("Expected expanded picker choices")
+        }
+        XCTAssertEqual(original, "auto")
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[1].content, .modified(content: .text("High"), modifier: .tag("high")))
+        try await kernel.setInput(inputID, to: "high")
+        let selected = try await kernel.evaluate("selected")
+        XCTAssertEqual(selected.value, "high")
+    }
+
+    func testCustomViewCallbackCanClearComposedBinding() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct RootView: View {
+            @State private var draft = "Ready"
+            var body: some View {
+                Composer(text: $draft, onSend: { draft = "" })
+            }
+        }
+        struct Composer: View {
+            @Binding var text: String
+            let onSend: () -> Void
+            var body: some View {
+                VStack {
+                    TextField("Nachricht", text: $text)
+                    Button(action: onSend) { Text("Senden") }
+                }
+            }
+        }
+        """
+        let first = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .verticalStack(_, _, let children) = first,
+              case .button(_, let actionID, _) = children[1] else {
+            return XCTFail("Expected callback button")
+        }
+        _ = try await kernel.performAction(actionID)
+        let refreshed = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .verticalStack(_, _, let updated) = refreshed,
+              case .textField(_, let value, _, _) = updated[0] else {
+            return XCTFail("Expected composer input")
+        }
+        XCTAssertEqual(value, "")
+    }
+
     func testEvaluatesSwiftExpression() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let result = try await kernel.evaluate("1 + 2 * 3")
@@ -1279,7 +1383,7 @@ final class InterpreterKernelTests: XCTestCase {
             )
             XCTFail("An unsupported view must be rejected even in an inactive branch")
         } catch let error as RuntimeViewLoweringError {
-            XCTAssertEqual(error, .unsupportedView("Menu"))
+            XCTAssertEqual(error, .unsupportedArgument("Menu"))
         }
     }
 

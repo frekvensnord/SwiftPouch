@@ -220,14 +220,16 @@ struct CustomViewSourceExpander: Sendable {
                       let identifier = binding.pattern.as(IdentifierPatternSyntax.self),
                       case nil = binding.initializer,
                       case nil = binding.accessorBlock,
-                      let type = binding.typeAnnotation?.type,
-                      case nil = type.as(FunctionTypeSyntax.self) else {
+                      let type = binding.typeAnnotation?.type else {
                     throw unsupportedCustomView(
                         name,
                         "stored inputs must be simple immutable let properties without wrappers or defaults"
                     )
                 }
-                inputs.append(CustomViewInput(name: identifier.identifier.text, kind: .value))
+                inputs.append(CustomViewInput(
+                    name: identifier.identifier.text,
+                    kind: type.as(FunctionTypeSyntax.self) == nil ? .value : .function
+                ))
             } else {
                 throw unsupportedCustomView(
                     name,
@@ -254,7 +256,7 @@ struct CustomViewSourceExpander: Sendable {
         var values: [String: CustomViewArgumentValue] = [:]
         for (argument, input) in zip(call.arguments, definition.inputs) {
             guard argument.label?.text == input.name,
-                  argument.expression.as(ClosureExprSyntax.self) == nil else {
+                  (input.kind == .function || argument.expression.as(ClosureExprSyntax.self) == nil) else {
                 throw RuntimeViewLoweringError.unsupportedArgument(
                     "custom view input \(input.name) must be a labeled non-closure expression"
                 )
@@ -269,6 +271,14 @@ struct CustomViewSourceExpander: Sendable {
                 values[input.name] = CustomViewArgumentValue(
                     expression: projectedName,
                     supportsProjection: true
+                )
+            } else if input.kind == .function {
+                guard argument.expression.as(ClosureExprSyntax.self) != nil
+                        || argument.expression.as(DeclReferenceExprSyntax.self) != nil else {
+                    throw RuntimeViewLoweringError.unsupportedArgument("custom view callback \(input.name)")
+                }
+                values[input.name] = CustomViewArgumentValue(
+                    expression: expression, supportsProjection: false, isCallable: true
                 )
             } else {
                 values[input.name] = CustomViewArgumentValue(
@@ -332,7 +342,8 @@ struct CustomViewSourceExpander: Sendable {
         references.walk(expression)
         var replacements: [SourceReplacement] = []
         for reference in references.references {
-            guard let value = values[reference.name], !reference.isFunctionName else { continue }
+            guard let value = values[reference.name],
+                  !reference.isFunctionName || value.isCallable else { continue }
             if reference.isProjection && !value.supportsProjection {
                 throw RuntimeViewLoweringError.unsupportedExpression(
                     "custom view input \(reference.name) is not a projected @Binding value"
@@ -341,7 +352,9 @@ struct CustomViewSourceExpander: Sendable {
             replacements.append(SourceReplacement(
                 start: reference.start,
                 end: reference.end,
-                text: reference.isProjection ? "$\(value.expression)" : value.expression
+                text: reference.isProjection ? "$\(value.expression)"
+                    : reference.isFunctionName && value.expression.hasPrefix("{")
+                        ? "(\(value.expression))" : value.expression
             ))
         }
         replacements.sort { $0.start > $1.start }
@@ -362,7 +375,8 @@ struct CustomViewSourceExpander: Sendable {
 
     private static let builtInViewNames: Set<String> = [
         "Text", "Image", "Color", "RoundedRectangle", "Rectangle", "Circle", "Capsule",
-        "VStack", "HStack", "Group", "EmptyView", "Spacer", "Divider"
+        "VStack", "HStack", "Group", "EmptyView", "Spacer", "Divider",
+        "TextField", "Picker", "Menu", "Form", "Section"
     ]
 }
 
@@ -378,12 +392,20 @@ private struct CustomViewInput {
     enum Kind: Equatable {
         case value
         case binding
+        case function
     }
 }
 
 private struct CustomViewArgumentValue {
     let expression: String
     let supportsProjection: Bool
+    let isCallable: Bool
+
+    init(expression: String, supportsProjection: Bool, isCallable: Bool = false) {
+        self.expression = expression
+        self.supportsProjection = supportsProjection
+        self.isCallable = isCallable
+    }
 }
 
 private struct CustomViewCall {

@@ -17,6 +17,17 @@ public struct RuntimeActionID: Codable, Hashable, Sendable {
     }
 }
 
+/// Identity for a writable interpreted String binding in a rendered control.
+public struct RuntimeInputID: Codable, Hashable, Sendable {
+    public let rawValue: UUID
+
+    public init(_ rawValue: UUID = UUID()) { self.rawValue = rawValue }
+}
+
+public enum RuntimeTextFieldAxis: String, Codable, Equatable, Sendable {
+    case horizontal, vertical
+}
+
 /// A deterministic, type-tagged identifier for an interpreted collection row.
 public struct RuntimeForEachID: Codable, Hashable, Sendable {
     public let rawValue: String
@@ -253,6 +264,11 @@ public enum RuntimeViewModifier: Codable, Equatable, Sendable {
     case background(style: RuntimeBackgroundStyle, shape: RuntimeShape?)
     case overlay(alignment: RuntimeFrameAlignment, overlay: RuntimeViewNode)
     case contentShape(RuntimeShape)
+    case tag(String)
+    case submitLabelSend
+    case onSubmit(RuntimeActionID)
+    case textInputAutocapitalizationNever
+    case autocorrectionDisabled(Bool)
 }
 
 /// A renderer-independent tree that interpreted view declarations can produce.
@@ -264,6 +280,7 @@ public indirect enum RuntimeViewNode: Codable, Equatable, Sendable {
     case empty
     case text(String)
     case image(systemName: String)
+    case label(title: String, systemName: String)
     case color(RuntimeColorValue)
     case shape(RuntimeShape)
     case filledShape(shape: RuntimeShape, color: RuntimeColorValue)
@@ -293,6 +310,11 @@ public indirect enum RuntimeViewNode: Codable, Equatable, Sendable {
         actionID: RuntimeActionID,
         role: RuntimeButtonRole?
     )
+    case textField(title: String, value: String, inputID: RuntimeInputID, axis: RuntimeTextFieldAxis)
+    case picker(title: String, selection: String, inputID: RuntimeInputID, content: RuntimeViewNode)
+    case menu(label: RuntimeViewNode, content: RuntimeViewNode)
+    case form(RuntimeViewNode)
+    case section(title: String?, content: RuntimeViewNode)
     case spacer(minLength: Double?)
     case divider
 }
@@ -305,18 +327,22 @@ public struct SwiftUIRuntimeRenderer: View {
     private let node: RuntimeViewNode
     private let onAction: @MainActor (RuntimeActionID) -> Void
     private let onActionWithDismissal: (@MainActor @Sendable (RuntimeActionID) async -> Bool)?
+    private let onInput: @MainActor (RuntimeInputID, String) -> Void
     private let scrollRequest: RuntimeScrollRequest?
+    @State private var localInputValues: [RuntimeInputID: String] = [:]
 
     @Environment(\.dismiss) private var hostDismissAction
 
     public init(
         node: RuntimeViewNode,
         scrollRequest: RuntimeScrollRequest? = nil,
-        onAction: @escaping @MainActor (RuntimeActionID) -> Void = { _ in }
+        onAction: @escaping @MainActor (RuntimeActionID) -> Void = { _ in },
+        onInput: @escaping @MainActor (RuntimeInputID, String) -> Void = { _, _ in }
     ) {
         self.node = node
         self.onAction = onAction
         self.onActionWithDismissal = nil
+        self.onInput = onInput
         self.scrollRequest = scrollRequest
     }
 
@@ -327,11 +353,13 @@ public struct SwiftUIRuntimeRenderer: View {
     public init(
         node: RuntimeViewNode,
         scrollRequest: RuntimeScrollRequest? = nil,
-        onActionWithDismissal: @escaping @MainActor @Sendable (RuntimeActionID) async -> Bool
+        onActionWithDismissal: @escaping @MainActor @Sendable (RuntimeActionID) async -> Bool,
+        onInput: @escaping @MainActor (RuntimeInputID, String) -> Void = { _, _ in }
     ) {
         self.node = node
         self.onAction = { _ in }
         self.onActionWithDismissal = onActionWithDismissal
+        self.onInput = onInput
         self.scrollRequest = scrollRequest
     }
 
@@ -339,12 +367,14 @@ public struct SwiftUIRuntimeRenderer: View {
         node: RuntimeViewNode,
         scrollRequest: RuntimeScrollRequest?,
         onAction: @escaping @MainActor (RuntimeActionID) -> Void,
-        onActionWithDismissal: (@MainActor @Sendable (RuntimeActionID) async -> Bool)?
+        onActionWithDismissal: (@MainActor @Sendable (RuntimeActionID) async -> Bool)?,
+        onInput: @escaping @MainActor (RuntimeInputID, String) -> Void
     ) {
         self.node = node
         self.scrollRequest = scrollRequest
         self.onAction = onAction
         self.onActionWithDismissal = onActionWithDismissal
+        self.onInput = onInput
     }
 
     @ViewBuilder
@@ -365,6 +395,8 @@ public struct SwiftUIRuntimeRenderer: View {
             Text(value)
         case .image(let systemName):
             Image(systemName: systemName)
+        case .label(let title, let systemName):
+            Label(title, systemImage: systemName)
         case .color(let value):
             color(value.style).opacity(value.opacity)
         case .shape(let shape):
@@ -395,7 +427,8 @@ public struct SwiftUIRuntimeRenderer: View {
                     node: content,
                     scrollRequest: scrollRequest,
                     onAction: onAction,
-                    onActionWithDismissal: onActionWithDismissal
+                    onActionWithDismissal: onActionWithDismissal,
+                    onInput: onInput
                 )
                 .onAppear { applyScrollRequest(readerID: id, proxy: proxy) }
                 .onChange(of: scrollRequest?.token) { _ in
@@ -434,6 +467,26 @@ public struct SwiftUIRuntimeRenderer: View {
                     render(label)
                 }
             }
+        case .textField(let title, let value, let inputID, let axis):
+            if axis == .vertical {
+                TextField(title, text: textBinding(inputID, value: value), axis: .vertical)
+            } else {
+                TextField(title, text: textBinding(inputID, value: value))
+            }
+        case .picker(let title, let selection, let inputID, let content):
+            Picker(title, selection: textBinding(inputID, value: selection)) {
+                render(content)
+            }
+        case .menu(let label, let content):
+            Menu { render(content) } label: { render(label) }
+        case .form(let content):
+            Form { render(content) }
+        case .section(let title, let content):
+            if let title {
+                Section(title) { render(content) }
+            } else {
+                Section { render(content) }
+            }
         case .spacer(let minLength):
             Spacer(minLength: minLength.map { CGFloat($0) })
         case .divider:
@@ -455,12 +508,29 @@ public struct SwiftUIRuntimeRenderer: View {
         }
     }
 
+    private func textBinding(_ id: RuntimeInputID, value: String) -> Binding<String> {
+        Binding(get: { localInputValues[id] ?? value }, set: { newValue in
+            localInputValues[id] = newValue
+            onInput(id, newValue)
+        })
+    }
+
     @ViewBuilder
     private func renderModified(
         _ content: RuntimeViewNode,
         modifier: RuntimeViewModifier
     ) -> some View {
         switch modifier {
+        case .tag(let value):
+            render(content).tag(value)
+        case .submitLabelSend:
+            render(content).submitLabel(.send)
+        case .onSubmit(let actionID):
+            render(content).onSubmit { dispatchAction(actionID) }
+        case .textInputAutocapitalizationNever:
+            render(content).textInputAutocapitalization(.never)
+        case .autocorrectionDisabled(let value):
+            render(content).autocorrectionDisabled(value)
         case .id(let id):
             render(content).id(id)
         case .padding(let edges, let length):
