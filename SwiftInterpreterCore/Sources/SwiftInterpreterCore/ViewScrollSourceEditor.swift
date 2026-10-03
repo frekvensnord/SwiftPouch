@@ -82,8 +82,7 @@ enum ViewScrollSourceEditor {
             __swiftpouch_scroll_anchor = \(String(reflecting: anchor)); \
             __swiftpouch_scroll_requested = true })()
             """
-            let range = call.positionAfterSkippingLeadingTrivia.utf8Offset
-                ..<call.endPositionBeforeTrailingTrivia.utf8Offset
+            let range = call.positionAfterSkippingLeadingTrivia.utf8Offset..<call.endPositionBeforeTrailingTrivia.utf8Offset
             bytes.replaceSubrange(range, with: replacement.utf8)
         }
         return String(decoding: bytes, as: UTF8.self)
