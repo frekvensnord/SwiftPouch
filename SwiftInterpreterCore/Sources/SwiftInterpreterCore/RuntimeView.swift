@@ -26,6 +26,28 @@ public struct RuntimeForEachID: Codable, Hashable, Sendable {
     }
 }
 
+public enum RuntimeScrollAxis: String, Codable, Equatable, Sendable {
+    case vertical, horizontal, both
+}
+
+public enum RuntimeScrollAnchor: String, Codable, Equatable, Sendable {
+    case top, center, bottom, leading, trailing
+}
+
+public struct RuntimeScrollRequest: Codable, Equatable, Sendable {
+    public let readerID: String
+    public let targetID: RuntimeForEachID
+    public let anchor: RuntimeScrollAnchor?
+    public let token: UUID
+
+    public init(readerID: String, targetID: RuntimeForEachID, anchor: RuntimeScrollAnchor?) {
+        self.readerID = readerID
+        self.targetID = targetID
+        self.anchor = anchor
+        self.token = UUID()
+    }
+}
+
 /// One lowered collection row. Its identity comes from the interpreted
 /// element's `Identifiable.id` or the explicit `ForEach(_:id:)` key path.
 public struct RuntimeForEachItem: Codable, Equatable, Sendable, Identifiable {
@@ -213,6 +235,7 @@ public enum RuntimeLineLimit: Codable, Equatable, Sendable {
 }
 
 public enum RuntimeViewModifier: Codable, Equatable, Sendable {
+    case id(RuntimeForEachID)
     case padding(edges: RuntimePaddingEdges, length: Double?)
     case frame(
         width: Double?,
@@ -248,6 +271,13 @@ public indirect enum RuntimeViewNode: Codable, Equatable, Sendable {
     case modified(content: RuntimeViewNode, modifier: RuntimeViewModifier)
     case group([RuntimeViewNode])
     case forEach([RuntimeForEachItem])
+    case scrollView(axis: RuntimeScrollAxis, showsIndicators: Bool, content: RuntimeViewNode)
+    case scrollViewReader(id: String, content: RuntimeViewNode)
+    case lazyVerticalStack(
+        alignment: RuntimeHorizontalAlignment,
+        spacing: Double?,
+        children: [RuntimeViewNode]
+    )
     case verticalStack(
         alignment: RuntimeHorizontalAlignment,
         spacing: Double?,
@@ -275,16 +305,19 @@ public struct SwiftUIRuntimeRenderer: View {
     private let node: RuntimeViewNode
     private let onAction: @MainActor (RuntimeActionID) -> Void
     private let onActionWithDismissal: (@MainActor @Sendable (RuntimeActionID) async -> Bool)?
+    private let scrollRequest: RuntimeScrollRequest?
 
     @Environment(\.dismiss) private var hostDismissAction
 
     public init(
         node: RuntimeViewNode,
+        scrollRequest: RuntimeScrollRequest? = nil,
         onAction: @escaping @MainActor (RuntimeActionID) -> Void = { _ in }
     ) {
         self.node = node
         self.onAction = onAction
         self.onActionWithDismissal = nil
+        self.scrollRequest = scrollRequest
     }
 
     /// Renders actions that may request dismissal of the native presentation
@@ -293,10 +326,24 @@ public struct SwiftUIRuntimeRenderer: View {
     /// sheet's own host context.
     public init(
         node: RuntimeViewNode,
+        scrollRequest: RuntimeScrollRequest? = nil,
         onActionWithDismissal: @escaping @MainActor @Sendable (RuntimeActionID) async -> Bool
     ) {
         self.node = node
         self.onAction = { _ in }
+        self.onActionWithDismissal = onActionWithDismissal
+        self.scrollRequest = scrollRequest
+    }
+
+    private init(
+        node: RuntimeViewNode,
+        scrollRequest: RuntimeScrollRequest?,
+        onAction: @escaping @MainActor (RuntimeActionID) -> Void,
+        onActionWithDismissal: (@MainActor @Sendable (RuntimeActionID) async -> Bool)?
+    ) {
+        self.node = node
+        self.scrollRequest = scrollRequest
+        self.onAction = onAction
         self.onActionWithDismissal = onActionWithDismissal
     }
 
@@ -337,6 +384,29 @@ public struct SwiftUIRuntimeRenderer: View {
         case .forEach(let items):
             ForEach(items, id: \.id) { item in
                 render(item.content)
+            }
+        case .scrollView(let axis, let showsIndicators, let content):
+            ScrollView(scrollAxes(axis), showsIndicators: showsIndicators) {
+                render(content)
+            }
+        case .scrollViewReader(let id, let content):
+            ScrollViewReader { proxy in
+                SwiftUIRuntimeRenderer(
+                    node: content,
+                    scrollRequest: scrollRequest,
+                    onAction: onAction,
+                    onActionWithDismissal: onActionWithDismissal
+                )
+                .onAppear { applyScrollRequest(readerID: id, proxy: proxy) }
+                .onChange(of: scrollRequest?.token) { _ in
+                    applyScrollRequest(readerID: id, proxy: proxy)
+                }
+            }
+        case .lazyVerticalStack(let alignment, let spacing, let children):
+            LazyVStack(alignment: horizontalAlignment(alignment), spacing: spacing.map { CGFloat($0) }) {
+                ForEach(children.indices, id: \.self) { index in
+                    render(children[index])
+                }
             }
         case .verticalStack(let alignment, let spacing, let children):
             VStack(alignment: horizontalAlignment(alignment), spacing: spacing.map { CGFloat($0) }) {
@@ -391,6 +461,8 @@ public struct SwiftUIRuntimeRenderer: View {
         modifier: RuntimeViewModifier
     ) -> some View {
         switch modifier {
+        case .id(let id):
+            render(content).id(id)
         case .padding(let edges, let length):
             render(content).padding(edgeSet(edges), length.map { CGFloat($0) })
         case .frame(let width, let height, let maxWidth, let maxHeight, let alignment):
@@ -434,6 +506,28 @@ public struct SwiftUIRuntimeRenderer: View {
         case .contentShape(let shape):
             renderContentShape(content, shape: shape)
         }
+    }
+
+    private func scrollAxes(_ axis: RuntimeScrollAxis) -> Axis.Set {
+        switch axis {
+        case .vertical: .vertical
+        case .horizontal: .horizontal
+        case .both: [.vertical, .horizontal]
+        }
+    }
+
+    private func applyScrollRequest(readerID: String, proxy: ScrollViewProxy) {
+        guard let scrollRequest, scrollRequest.readerID == readerID else { return }
+        let anchor: UnitPoint?
+        switch scrollRequest.anchor {
+        case .top: anchor = .top
+        case .center: anchor = .center
+        case .bottom: anchor = .bottom
+        case .leading: anchor = .leading
+        case .trailing: anchor = .trailing
+        case nil: anchor = nil
+        }
+        proxy.scrollTo(scrollRequest.targetID, anchor: anchor)
     }
 
     @ViewBuilder

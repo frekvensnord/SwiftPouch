@@ -59,6 +59,8 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     private let resolvedDynamicConditions: [String: Bool]
     private let resolvedDynamicBooleans: [String: Bool]
     private let resolvedDynamicBooleanSites: [Int: Bool]
+    private let resolvedScrollIDs: [String: RuntimeForEachID]
+    private let resolvedScrollIDSites: [Int: RuntimeForEachID]
     private let forEachBindingsByActionOffset: [Int: [RuntimeForEachItemBinding]]
     private let actionRecorder: RuntimeActionRecorder?
 
@@ -68,6 +70,8 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         self.resolvedDynamicConditions = [:]
         self.resolvedDynamicBooleans = [:]
         self.resolvedDynamicBooleanSites = [:]
+        self.resolvedScrollIDs = [:]
+        self.resolvedScrollIDSites = [:]
         self.forEachBindingsByActionOffset = [:]
         self.actionRecorder = nil
     }
@@ -78,6 +82,8 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         resolvedDynamicBooleans: [String: Bool] = [:],
         resolvedDynamicStringSites: [Int: String] = [:],
         resolvedDynamicBooleanSites: [Int: Bool] = [:],
+        resolvedScrollIDs: [String: RuntimeForEachID] = [:],
+        resolvedScrollIDSites: [Int: RuntimeForEachID] = [:],
         forEachBindingsByActionOffset: [Int: [RuntimeForEachItemBinding]] = [:],
         actionRecorder: RuntimeActionRecorder? = nil
     ) {
@@ -86,6 +92,8 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         self.resolvedDynamicConditions = resolvedDynamicConditions
         self.resolvedDynamicBooleans = resolvedDynamicBooleans
         self.resolvedDynamicBooleanSites = resolvedDynamicBooleanSites
+        self.resolvedScrollIDs = resolvedScrollIDs
+        self.resolvedScrollIDSites = resolvedScrollIDSites
         self.forEachBindingsByActionOffset = forEachBindingsByActionOffset
         self.actionRecorder = actionRecorder
     }
@@ -113,6 +121,8 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             resolvedDynamicBooleans: resolvedDynamicBooleans,
             resolvedDynamicStringSites: resolvedDynamicStringSites,
             resolvedDynamicBooleanSites: resolvedDynamicBooleanSites,
+            resolvedScrollIDs: resolvedScrollIDs,
+            resolvedScrollIDSites: resolvedScrollIDSites,
             forEachBindingsByActionOffset: forEachBindingsByActionOffset,
             actionRecorder: recorder
         )
@@ -145,6 +155,13 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     func dynamicBooleanModifierArgumentSites(in source: String) throws -> [DynamicViewExpressionSite] {
         let syntaxTree = try parseSyntaxTree(source)
         let visitor = DynamicBooleanModifierExpressionVisitor()
+        visitor.walk(syntaxTree)
+        return visitor.sites.sorted { $0.utf8Offset < $1.utf8Offset }
+    }
+
+    func scrollIDExpressionSites(in source: String) throws -> [DynamicViewExpressionSite] {
+        let syntaxTree = try parseSyntaxTree(source)
+        let visitor = ScrollIDExpressionVisitor()
         visitor.walk(syntaxTree)
         return visitor.sites.sorted { $0.utf8Offset < $1.utf8Offset }
     }
@@ -209,8 +226,14 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             return try lowerShape(name, call: call)
         case "VStack":
             return try lowerStack(call, isVertical: true)
+        case "LazyVStack":
+            return try lowerLazyVStack(call)
         case "HStack":
             return try lowerStack(call, isVertical: false)
+        case "ScrollView":
+            return try lowerScrollView(call)
+        case "ScrollViewReader":
+            return try lowerScrollViewReader(call)
         case "Group":
             return try lowerGroup(call)
         case "__SwiftPouchForEachGroup":
@@ -373,8 +396,13 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         let actionSource = actionClosure.statements.description
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let actionOffset = call.positionAfterSkippingLeadingTrivia.utf8Offset
-        let actionID = actionRecorder?.record(
+        let scrollContext = try ViewScrollSourceEditor.context(enclosing: call)
+        let preparedAction = try ViewScrollSourceEditor.rewriteAction(
             actionSource,
+            context: scrollContext
+        )
+        let actionID = actionRecorder?.record(
+            preparedAction,
             forEachBindings: forEachBindingsByActionOffset[actionOffset] ?? []
         ) ?? RuntimeActionID()
         return .button(label: label, actionID: actionID, role: role)
@@ -450,6 +478,81 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             let spacing = try optionalNumber(spacingArgument, viewName: name)
             return .horizontalStack(alignment: alignment, spacing: spacing, children: childNodes)
         }
+    }
+
+    private func lowerLazyVStack(_ call: FunctionCallExprSyntax) throws -> RuntimeViewNode {
+        guard call.additionalTrailingClosures.isEmpty,
+              let closure = call.trailingClosure,
+              call.arguments.allSatisfy({ ["alignment", "spacing"].contains($0.label?.text ?? "") }),
+              Set(call.arguments.map { $0.label?.text ?? "" }).count == call.arguments.count else {
+            throw RuntimeViewLoweringError.unsupportedArgument("LazyVStack")
+        }
+        let alignment = try horizontalAlignment(
+            call.arguments.first(where: { $0.label?.text == "alignment" })?.expression,
+            viewName: "LazyVStack"
+        )
+        let spacing = try optionalNumber(
+            call.arguments.first(where: { $0.label?.text == "spacing" })?.expression,
+            viewName: "LazyVStack"
+        )
+        let content = try lowerViewBuilderStatements(closure.statements)
+        let children: [RuntimeViewNode]
+        if case .group(let group) = content {
+            children = group
+        } else if content == .empty {
+            children = []
+        } else {
+            children = [content]
+        }
+        return .lazyVerticalStack(alignment: alignment, spacing: spacing, children: children)
+    }
+
+    private func lowerScrollView(_ call: FunctionCallExprSyntax) throws -> RuntimeViewNode {
+        guard call.additionalTrailingClosures.isEmpty,
+              let closure = call.trailingClosure,
+              call.arguments.count <= 2 else {
+            throw RuntimeViewLoweringError.unsupportedArgument("ScrollView")
+        }
+        var axis = RuntimeScrollAxis.vertical
+        var showsIndicators = true
+        var sawAxis = false
+        var sawIndicators = false
+        for argument in call.arguments {
+            switch argument.label?.text {
+            case nil:
+                guard !sawAxis,
+                      let name = staticMemberName(argument.expression),
+                      let parsed = RuntimeScrollAxis(rawValue: name) else {
+                    throw RuntimeViewLoweringError.unsupportedArgument("ScrollView axes")
+                }
+                axis = parsed
+                sawAxis = true
+            case "showsIndicators":
+                guard !sawIndicators, let value = staticBoolean(argument.expression) else {
+                    throw RuntimeViewLoweringError.unsupportedArgument("ScrollView indicators")
+                }
+                showsIndicators = value
+                sawIndicators = true
+            default:
+                throw RuntimeViewLoweringError.unsupportedArgument("ScrollView")
+            }
+        }
+        return .scrollView(
+            axis: axis,
+            showsIndicators: showsIndicators,
+            content: try lowerViewBuilderStatements(closure.statements)
+        )
+    }
+
+    private func lowerScrollViewReader(_ call: FunctionCallExprSyntax) throws -> RuntimeViewNode {
+        let context = try ViewScrollSourceEditor.context(for: call)
+        guard let closure = call.trailingClosure else {
+            throw RuntimeViewLoweringError.unsupportedArgument("ScrollViewReader")
+        }
+        return .scrollViewReader(
+            id: context.readerID,
+            content: try lowerViewBuilderStatements(closure.statements)
+        )
     }
 
     private func lowerConditional(_ conditional: IfExprSyntax) throws -> RuntimeViewNode {
@@ -563,6 +666,15 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
 
         let modifier: RuntimeViewModifier
         switch name {
+        case "id":
+            guard call.arguments.count == 1,
+                  let argument = call.arguments.first,
+                  argument.label == nil,
+                  let id = resolvedScrollIDSites[argument.expression.positionAfterSkippingLeadingTrivia.utf8Offset]
+                    ?? resolvedScrollIDs[argument.expression.trimmedDescription] else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            modifier = .id(id)
         case "padding":
             modifier = try paddingModifier(call)
         case "frame":
@@ -1228,6 +1340,32 @@ private final class DynamicBooleanModifierExpressionVisitor: SyntaxVisitor {
                 utf8Offset: argument.expression.positionAfterSkippingLeadingTrivia.utf8Offset
             )
         )
+        return .visitChildren
+    }
+}
+
+private final class ScrollIDExpressionVisitor: SyntaxVisitor {
+    private(set) var sites: [DynamicViewExpressionSite] = []
+
+    init() {
+        super.init(viewMode: .sourceAccurate)
+    }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        if isInsideButtonActionClosure(node) { return .skipChildren }
+        guard let member = node.calledExpression.as(MemberAccessExprSyntax.self),
+              member.declName.baseName.text == "id",
+              node.arguments.count == 1,
+              let argument = node.arguments.first,
+              argument.label == nil,
+              node.trailingClosure == nil,
+              node.additionalTrailingClosures.isEmpty else {
+            return .visitChildren
+        }
+        sites.append(DynamicViewExpressionSite(
+            expression: argument.expression.trimmedDescription,
+            utf8Offset: argument.expression.positionAfterSkippingLeadingTrivia.utf8Offset
+        ))
         return .visitChildren
     }
 }

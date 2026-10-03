@@ -17,6 +17,7 @@ public struct InterpreterSourceFileControls: View {
     @Environment(\.scenePhase) private var hostScenePhase
     @State private var linkedFile: ProjectSourceFileReference?
     @State private var appViewSnapshot: InterpretedAppViewSnapshot?
+    @State private var scrollRequest: RuntimeScrollRequest?
     @State private var errorMessage: String?
     @State private var isFileImporterPresented = false
     @State private var isWorking = false
@@ -70,6 +71,7 @@ public struct InterpreterSourceFileControls: View {
                         .font(.headline)
                     SwiftUIRuntimeRenderer(
                         node: appViewSnapshot.rootView,
+                        scrollRequest: scrollRequest,
                         onActionWithDismissal: { actionID in
                             await performAction(actionID, in: appViewSnapshot)
                         }
@@ -117,6 +119,7 @@ public struct InterpreterSourceFileControls: View {
         isWorking = true
         errorMessage = nil
         appViewSnapshot = nil
+        scrollRequest = nil
 
         do {
             linkedFile = try await kernel.linkSourceFile(at: url)
@@ -144,6 +147,7 @@ public struct InterpreterSourceFileControls: View {
             appViewSnapshot = try await kernel.reloadAndRunApp(
                 scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
             )
+            scrollRequest = nil
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -166,6 +170,7 @@ public struct InterpreterSourceFileControls: View {
                 snapshot,
                 scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
             )
+            scrollRequest = result.scrollRequest
             requestsHostDismissal = result.requestsHostDismissal
         } catch {
             errorMessage = error.localizedDescription
@@ -179,6 +184,7 @@ public struct InterpreterSourceFileControls: View {
         isWorking = true
         errorMessage = nil
         appViewSnapshot = nil
+        scrollRequest = nil
 
         do {
             try await kernel.unlinkSourceFile()

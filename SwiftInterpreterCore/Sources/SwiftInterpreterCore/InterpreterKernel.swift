@@ -26,15 +26,18 @@ public struct EvaluationResult: Equatable, Sendable {
     public let value: String
     public let standardOutput: String
     public let requestsHostDismissal: Bool
+    public let scrollRequest: RuntimeScrollRequest?
 
     public init(
         value: String,
         standardOutput: String,
-        requestsHostDismissal: Bool = false
+        requestsHostDismissal: Bool = false,
+        scrollRequest: RuntimeScrollRequest? = nil
     ) {
         self.value = value
         self.standardOutput = standardOutput
         self.requestsHostDismissal = requestsHostDismissal
+        self.scrollRequest = scrollRequest
     }
 }
 
@@ -137,9 +140,11 @@ public actor InterpreterKernel {
         let allTextExpressions = Array(Set(allTextSites.map(\.expression))).sorted()
         let dynamicConditions = try viewExpressionLowerer.dynamicBooleanConditions(in: source)
         let dynamicDisabledExpressions = try viewExpressionLowerer.dynamicBooleanModifierArguments(in: source)
+        let allScrollIDSites = try viewExpressionLowerer.scrollIDExpressionSites(in: source)
         guard !allTextSites.isEmpty
                 || !dynamicConditions.isEmpty
                 || !dynamicDisabledExpressions.isEmpty
+                || !allScrollIDSites.isEmpty
                 || containsForEach else {
             let loweredView = try viewExpressionLowerer.lowerRecordingActions(source)
             if let stateTypeName {
@@ -152,13 +157,17 @@ public actor InterpreterKernel {
         let textPlaceholders = Dictionary(uniqueKeysWithValues: allTextExpressions.map { ($0, "") })
         let conditionPlaceholders = Dictionary(uniqueKeysWithValues: dynamicConditions.map { ($0, false) })
         let disabledPlaceholders = Dictionary(uniqueKeysWithValues: dynamicDisabledExpressions.map { ($0, false) })
+        let scrollIDPlaceholders = Dictionary(uniqueKeysWithValues: allScrollIDSites.map {
+            ($0.expression, RuntimeForEachID(rawValue: "validation"))
+        })
         let validationSource = containsForEach
             ? try viewForEachSourceEditor.replacingForEachWithBodies(in: source)
             : source
         _ = try SwiftUIViewExpressionLowerer(
             resolvedDynamicStrings: textPlaceholders,
             resolvedDynamicConditions: conditionPlaceholders,
-            resolvedDynamicBooleans: disabledPlaceholders
+            resolvedDynamicBooleans: disabledPlaceholders,
+            resolvedScrollIDs: scrollIDPlaceholders
         ).lower(validationSource)
 
         if let stateTypeName {
@@ -213,6 +222,7 @@ public actor InterpreterKernel {
 
         let selectedTextSites = try viewExpressionLowerer.dynamicStringExpressionSites(in: selectedSource)
         let selectedDisabledSites = try viewExpressionLowerer.dynamicBooleanModifierArgumentSites(in: selectedSource)
+        let selectedScrollIDSites = try viewExpressionLowerer.scrollIDExpressionSites(in: selectedSource)
 
         let resolvedStringSites: [Int: String]
         if selectedTextSites.isEmpty {
@@ -239,11 +249,17 @@ public actor InterpreterKernel {
             bindingScopes: bindingScopes
         )
 
+        let resolvedScrollIDSites = try await resolveScrollIDExpressions(
+            selectedScrollIDSites,
+            bindingScopes: bindingScopes
+        )
+
         let loweredView = try SwiftUIViewExpressionLowerer(
             resolvedDynamicStrings: [:],
             resolvedDynamicBooleans: [:],
             resolvedDynamicStringSites: resolvedStringSites,
             resolvedDynamicBooleanSites: resolvedDisabledSites,
+            resolvedScrollIDSites: resolvedScrollIDSites,
             forEachBindingsByActionOffset: actionBindings
         ).lowerRecordingActions(selectedSource)
         registeredRuntimeActions = loweredView.actions
@@ -453,12 +469,32 @@ public actor InterpreterKernel {
                 resetInterpreter: false
             )
         }
+        interpreter.rootScope.bind("__swiftpouch_scroll_requested", value: .bool(false), mutable: true)
+        interpreter.rootScope.bind("__swiftpouch_scroll_target", value: .void, mutable: true)
+        interpreter.rootScope.bind("__swiftpouch_scroll_reader", value: .string(""), mutable: true)
+        interpreter.rootScope.bind("__swiftpouch_scroll_anchor", value: .string(""), mutable: true)
         let result = try await evaluateAction(action)
         let requestsHostDismissal = try await consumeHostDismissalRequest()
+        let scrollRequest = try consumeScrollRequest()
         return EvaluationResult(
             value: result.value,
             standardOutput: result.standardOutput,
-            requestsHostDismissal: requestsHostDismissal
+            requestsHostDismissal: requestsHostDismissal,
+            scrollRequest: scrollRequest
+        )
+    }
+
+    private func consumeScrollRequest() throws -> RuntimeScrollRequest? {
+        guard case .bool(true) = interpreter.rootScope.lookup("__swiftpouch_scroll_requested")?.value,
+              case .string(let readerID) = interpreter.rootScope.lookup("__swiftpouch_scroll_reader")?.value,
+              case .string(let rawAnchor) = interpreter.rootScope.lookup("__swiftpouch_scroll_anchor")?.value,
+              let target = interpreter.rootScope.lookup("__swiftpouch_scroll_target")?.value else {
+            return nil
+        }
+        return RuntimeScrollRequest(
+            readerID: readerID,
+            targetID: try stableForEachIdentifier(target),
+            anchor: rawAnchor.isEmpty ? nil : RuntimeScrollAnchor(rawValue: rawAnchor)
         )
     }
 
@@ -1042,6 +1078,43 @@ public actor InterpreterKernel {
             output.finish()
             _ = await output.readAllString()
             return values
+        } catch {
+            output.finish()
+            _ = await output.readAllString()
+            throw error
+        }
+    }
+
+    private func resolveScrollIDExpressions(
+        _ sites: [DynamicViewExpressionSite],
+        bindingScopes: [ActiveBindingScope]
+    ) async throws -> [Int: RuntimeForEachID] {
+        guard !sites.isEmpty else { return [:] }
+        let output = OutputSink()
+        let projectPath = workspace.rootURL.path
+        let shell = Shell(
+            stdout: output,
+            environment: Environment(variables: ["HOME": projectPath, "PWD": projectPath]),
+            sandbox: Sandbox.rooted(at: workspace.rootURL, allowedHosts: []),
+            hostInfo: .synthetic
+        )
+        do {
+            let ids = try await shell.withCurrent { @Sendable in
+                var resolved: [Int: RuntimeForEachID] = [:]
+                for site in sites {
+                    let value = try await self.evaluateViewExpression(
+                        site.expression,
+                        fallback: "nil",
+                        activeBindings: self.activeBindings(at: site.utf8Offset, in: bindingScopes),
+                        forEachBindings: self.activeForEachBindings(at: site.utf8Offset, in: bindingScopes)
+                    )
+                    resolved[site.utf8Offset] = try self.stableForEachIdentifier(value)
+                }
+                return resolved
+            }
+            output.finish()
+            _ = await output.readAllString()
+            return ids
         } catch {
             output.finish()
             _ = await output.readAllString()

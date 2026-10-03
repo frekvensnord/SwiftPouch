@@ -620,6 +620,74 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(empty, .forEach([]))
     }
 
+    func testScrollViewAndLazyStackRefreshIdentifiedRows() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        struct Row: Identifiable { let id: String; let title: String }
+        var rows = [Row(id: "a", title: "Alpha"), Row(id: "b", title: "Beta")]
+        """)
+        let source = """
+        ScrollView {
+            LazyVStack(spacing: 22) {
+                ForEach(rows) { row in Text(row.title).id(row.id) }
+            }
+        }
+        """
+        let initial = try await kernel.lowerViewExpression(source)
+        guard case .scrollView(.vertical, true, .lazyVerticalStack(_, let spacing, let children)) = initial,
+              spacing == 22,
+              children.count == 1,
+              case .forEach(let items) = children[0] else {
+            return XCTFail("Expected an identified collection inside a lazy scroll stack")
+        }
+        XCTAssertEqual(items.map(\.id.rawValue), ["6:String1:a", "6:String1:b"])
+        XCTAssertEqual(items[0].content, .modified(content: .text("Alpha"), modifier: .id(items[0].id)))
+
+        _ = try await kernel.evaluate("rows = [rows[1], Row(id: \"c\", title: \"Gamma\")]")
+        let updated = try await kernel.lowerViewExpression(source)
+        guard case .scrollView(_, _, .lazyVerticalStack(_, _, let refreshedChildren)) = updated,
+              case .some(.forEach(let refreshed)) = refreshedChildren.first else {
+            return XCTFail("Expected the refreshed scroll content")
+        }
+        XCTAssertEqual(refreshed.map(\.id.rawValue), ["6:String1:b", "6:String1:c"])
+    }
+
+    func testScrollReaderRoutesProxyRequestToStableRowID() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        struct Row: Identifiable { let id: String; let title: String }
+        let rows = [Row(id: "first", title: "Alpha"), Row(id: "last", title: "Omega")]
+        """)
+        let source = """
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack {
+                    ForEach(rows) { row in
+                        Button("Jump") { proxy.scrollTo(row.id, anchor: .bottom) }
+                    }
+                    Color.clear.id("chat-bottom")
+                }
+            }
+        }
+        """
+        let view = try await kernel.lowerViewExpression(source)
+        guard case .scrollViewReader(let readerID, .scrollView(_, _, .lazyVerticalStack(_, _, let children))) = view,
+              children.count == 2,
+              case .forEach(let items) = children[0],
+              items.count == 2,
+              case .button(_, let secondActionID, _) = items[1].content,
+              case .modified(_, .id(let bottomID)) = children[1] else {
+            return XCTFail("Expected the reader, row actions, and bottom scroll anchor")
+        }
+        XCTAssertEqual(bottomID.rawValue, "6:String11:chat-bottom")
+
+        let result = try await kernel.performAction(secondActionID)
+        XCTAssertEqual(result.scrollRequest?.readerID, readerID)
+        XCTAssertEqual(result.scrollRequest?.targetID, items[1].id)
+        XCTAssertEqual(result.scrollRequest?.anchor, .bottom)
+        XCTAssertFalse(result.requestsHostDismissal)
+    }
+
     func testLowerViewBodyExtractsTheNamedStructAndUsesInterpreterScope() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         _ = try await kernel.evaluate("var bodyCaption = \"first\"")
