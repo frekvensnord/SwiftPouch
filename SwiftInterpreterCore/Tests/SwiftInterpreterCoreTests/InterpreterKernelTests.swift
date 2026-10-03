@@ -1539,7 +1539,11 @@ final class InterpreterKernelTests: XCTestCase {
             return XCTFail("Expected the original view after the failed reload")
         }
         XCTAssertEqual(restoredChildren[0], .text("Changed"))
-        _ = try await kernel.performAction(actionID)
+        guard restoredChildren.count == 2,
+              case .button(_, let restoredActionID, _) = restoredChildren[1] else {
+            return XCTFail("Expected the restored view to keep its button")
+        }
+        _ = try await kernel.performAction(restoredActionID)
 
         try Data(validSource.utf8).write(to: sourceURL, options: .atomic)
         let successfulReload = try await kernel.reloadAndRunApp()
