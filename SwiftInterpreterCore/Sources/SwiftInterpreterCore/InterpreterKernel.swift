@@ -1108,7 +1108,7 @@ public actor InterpreterKernel {
                         activeBindings: self.activeBindings(at: site.utf8Offset, in: bindingScopes),
                         forEachBindings: self.activeForEachBindings(at: site.utf8Offset, in: bindingScopes)
                     )
-                    resolved[site.utf8Offset] = try self.stableForEachIdentifier(value)
+                    resolved[site.utf8Offset] = try await self.stableForEachIdentifier(value)
                 }
                 return resolved
             }
