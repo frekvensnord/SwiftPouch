@@ -424,6 +424,14 @@ public actor InterpreterKernel {
         guard !action.source.isEmpty else {
             return EvaluationResult(value: "", standardOutput: "")
         }
+        // A prior action can fail after requesting dismissal. Clear that request
+        // before executing the next action so an unrelated tap cannot consume it.
+        if interpreterDismissBridgeInstalled {
+            _ = try await evaluateLocked(
+                "__swiftpouch_host_dismiss_requested = false",
+                resetInterpreter: false
+            )
+        }
         let result = try await evaluateAction(action)
         let requestsHostDismissal = try await consumeHostDismissalRequest()
         return EvaluationResult(

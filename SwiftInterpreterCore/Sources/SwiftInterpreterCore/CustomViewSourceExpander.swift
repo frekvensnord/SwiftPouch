@@ -272,7 +272,7 @@ struct CustomViewSourceExpander: Sendable {
                 )
             } else {
                 values[input.name] = CustomViewArgumentValue(
-                    expression: expression,
+                    expression: "(\(expression))",
                     supportsProjection: false
                 )
             }

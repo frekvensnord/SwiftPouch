@@ -714,6 +714,24 @@ final class InterpreterKernelTests: XCTestCase {
         )
     }
 
+    func testCustomViewInputPreservesExpressionPrecedence() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct HostView: View {
+            var body: some View { FlagView(flag: false || true) }
+        }
+        struct FlagView: View {
+            let flag: Bool
+            var body: some View {
+                if !flag { Text("False") } else { Text("True") }
+            }
+        }
+        """
+
+        let view = try await kernel.lowerViewBody(in: source, typeName: "HostView")
+        XCTAssertEqual(view, .text("True"))
+    }
+
     func testCustomViewBindingReadsAndWritesTheParentStateCell() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let source = """
@@ -1544,6 +1562,43 @@ final class InterpreterKernelTests: XCTestCase {
 
         let secondCloseResult = try await kernel.performAction(closeActionID)
         XCTAssertTrue(secondCloseResult.requestsHostDismissal)
+    }
+
+    func testFailedDismissActionCannotDismissOnLaterTap() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct DismissView: View {
+            @Environment(\\.dismiss) private var dismiss
+            var body: some View {
+                HStack {
+                    Button("Fail") {
+                        dismiss()
+                        missingFunction()
+                    }
+                    Button("Stay") { print("staying") }
+                }
+            }
+        }
+        """
+
+        let view = try await kernel.lowerViewBody(in: source, typeName: "DismissView")
+        guard case .horizontalStack(_, _, let children) = view,
+              children.count == 2,
+              case .button(_, let failedActionID, _) = children[0],
+              case .button(_, let stayActionID, _) = children[1] else {
+            return XCTFail("Expected both actions")
+        }
+
+        do {
+            _ = try await kernel.performAction(failedActionID)
+            XCTFail("The missing function must fail")
+        } catch {
+            // The first statement already requested dismissal when execution failed.
+        }
+
+        let nextResult = try await kernel.performAction(stayActionID)
+        XCTAssertFalse(nextResult.requestsHostDismissal)
+        XCTAssertEqual(nextResult.standardOutput, "staying\n")
     }
 
     func testCustomViewDismissEnvironmentInheritsHostContext() async throws {
