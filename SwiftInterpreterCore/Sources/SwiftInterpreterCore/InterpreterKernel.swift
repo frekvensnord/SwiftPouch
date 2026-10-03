@@ -7,6 +7,7 @@ private struct ActiveBindingScope: Sendable {
     var upperBound: Int
     let bindings: [ViewConditionalBinding]
     let forEachBindings: [RuntimeForEachItemBinding]
+    let capturedActionBindings: [RuntimeForEachItemBinding]
 }
 
 private struct ResolvedConditionalSource: Sendable {
@@ -202,7 +203,8 @@ public actor InterpreterKernel {
                     lowerBound: scope.lowerBound,
                     upperBound: scope.upperBound,
                     bindings: [],
-                    forEachBindings: [scope.binding]
+                    forEachBindings: [scope.binding],
+                    capturedActionBindings: []
                 )
             })
             selectedSource = replacement.source
@@ -703,12 +705,33 @@ public actor InterpreterKernel {
                 selecting: conditionValue
             )
             if conditionValue, !conditional.bindings.isEmpty {
+                let outerBindings = activeBindings(
+                    at: conditional.startUTF8Offset,
+                    in: bindingScopes
+                )
+                let rowBindings = activeForEachBindings(
+                    at: conditional.startUTF8Offset,
+                    in: bindingScopes
+                )
+                var captures: [RuntimeForEachItemBinding] = []
+                for binding in conditional.bindings {
+                    captures.append(RuntimeForEachItemBinding(
+                        name: binding.name,
+                        value: try await evaluateViewExpression(
+                            binding.name,
+                            fallback: "nil",
+                            activeBindings: outerBindings + conditional.bindings,
+                            forEachBindings: rowBindings
+                        )
+                    ))
+                }
                 bindingScopes.append(
                     ActiveBindingScope(
                         lowerBound: replacementRange.lowerBound,
                         upperBound: replacementRange.upperBound,
                         bindings: conditional.bindings,
-                        forEachBindings: []
+                        forEachBindings: [],
+                        capturedActionBindings: captures
                     )
                 )
             }
@@ -1167,7 +1190,10 @@ public actor InterpreterKernel {
         bindingScopes: [ActiveBindingScope]
     ) throws -> [Int: [RuntimeForEachItemBinding]] {
         try viewExpressionLowerer.buttonCallOffsets(in: source).reduce(into: [:]) { result, offset in
-            let captures = activeForEachBindings(at: offset, in: bindingScopes)
+            let captures = bindingScopes
+                .filter { offset >= $0.lowerBound && offset < $0.upperBound }
+                .sorted { $0.lowerBound < $1.lowerBound }
+                .flatMap { $0.forEachBindings + $0.capturedActionBindings }
             if !captures.isEmpty {
                 result[offset] = captures
             }
@@ -1196,7 +1222,8 @@ public actor InterpreterKernel {
                     lowerBound: scope.lowerBound + offsetDelta,
                     upperBound: scope.upperBound + offsetDelta,
                     bindings: scope.bindings,
-                    forEachBindings: scope.forEachBindings
+                    forEachBindings: scope.forEachBindings,
+                    capturedActionBindings: scope.capturedActionBindings
                 )
             }
             if scope.lowerBound <= range.lowerBound && scope.upperBound >= range.upperBound {
@@ -1204,7 +1231,8 @@ public actor InterpreterKernel {
                     lowerBound: scope.lowerBound,
                     upperBound: scope.upperBound + offsetDelta,
                     bindings: scope.bindings,
-                    forEachBindings: scope.forEachBindings
+                    forEachBindings: scope.forEachBindings,
+                    capturedActionBindings: scope.capturedActionBindings
                 )
             }
             throw RuntimeViewLoweringError.malformedSyntax

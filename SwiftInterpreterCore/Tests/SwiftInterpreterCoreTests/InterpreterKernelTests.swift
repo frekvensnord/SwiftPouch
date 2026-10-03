@@ -1126,6 +1126,25 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(ready, .text("Ready"))
     }
 
+    func testOptionalBindingButtonCapturesTheRenderedValue() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var pendingCaption: String? = \"First\"; var selectedCaption = \"\"")
+
+        let view = try await kernel.lowerViewExpression("""
+        if let caption = pendingCaption {
+            Button("Select") { selectedCaption = caption }
+        }
+        """)
+        guard case .button(_, let actionID, _) = view else {
+            return XCTFail("Expected a button in the selected optional branch")
+        }
+
+        _ = try await kernel.evaluate("pendingCaption = \"Later\"")
+        _ = try await kernel.performAction(actionID)
+        let selected = try await kernel.evaluate("selectedCaption")
+        XCTAssertEqual(selected.value, "First")
+    }
+
     func testOptionalBindingSupportsFollowingBooleanConditions() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         _ = try await kernel.evaluate("var optionalCount: Int? = 3")
