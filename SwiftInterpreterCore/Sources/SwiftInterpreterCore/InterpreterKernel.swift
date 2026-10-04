@@ -80,6 +80,7 @@ public actor InterpreterKernel {
     private let viewBodySourceEditor: ViewBodySourceEditor
     private let customViewSourceExpander: CustomViewSourceExpander
     private let appEntryPointSourceExtractor: AppEntryPointSourceExtractor
+    private let appSourceBootstrapper: AppSourceBootstrapper
     private let scriptSourceAdapter: SwiftScriptSourceAdapter
     private let keychainBackend: any ProjectKeychainBackend
     private var interpreter: Interpreter
@@ -92,6 +93,9 @@ public actor InterpreterKernel {
     private var currentScenePhase: RuntimeScenePhase = .active
     private var interpreterScenePhase: RuntimeScenePhase?
     private var interpreterDismissBridgeInstalled = false
+    private var interpreterGeneration = UUID()
+    private var publishedRevision: UInt64 = 0
+    private var publishedObservers: [UUID: AsyncStream<UInt64>.Continuation] = [:]
     private var evaluationInProgress = false
     private var evaluationWaiters: [CheckedContinuation<Void, Never>] = []
 
@@ -111,6 +115,7 @@ public actor InterpreterKernel {
         self.viewBodySourceEditor = ViewBodySourceEditor()
         self.customViewSourceExpander = CustomViewSourceExpander()
         self.appEntryPointSourceExtractor = AppEntryPointSourceExtractor()
+        self.appSourceBootstrapper = AppSourceBootstrapper()
         self.scriptSourceAdapter = SwiftScriptSourceAdapter()
         let interpreter = Interpreter()
         interpreter.registerOnImport("Security", module: ProjectKeychainModule(projectID: workspace.id, backend: keychainBackend))
@@ -386,6 +391,10 @@ public actor InterpreterKernel {
             from: source,
             rootTypeName: typeName
         )
+        for (owner, declarations) in try customViewSourceExpander.stateDeclarations(in: source)
+        where owner != typeName {
+            try await seedViewStateDeclarations(declarations, typeName: owner)
+        }
         return try await lowerViewExpressionInCurrentScope(
             expandedExpression,
             stateDeclarations: extractedBody.stateDeclarations,
@@ -449,11 +458,8 @@ public actor InterpreterKernel {
 
     /// Reloads the linked SwiftUI app and lowers its root view for the host renderer.
     ///
-    /// This path deliberately executes only the root view's supported snapshot
-    /// expressions. It does not evaluate every top-level app declaration or run
-    /// the complete-source module preflight; those integrations are separate
-    /// runtime work. Each reload starts from a fresh interpreter scope and
-    /// replaces the active button-action table.
+    /// Model declarations and owned root objects are initialized in a fresh
+    /// interpreter scope before the root view is lowered.
     public func reloadAndRunApp(
         scenePhase: RuntimeScenePhase = .active
     ) async throws -> InterpretedAppViewSnapshot {
@@ -475,10 +481,18 @@ public actor InterpreterKernel {
         let previousScenePhase = currentScenePhase
         let previousInterpreterScenePhase = interpreterScenePhase
         let previousDismissBridgeInstalled = interpreterDismissBridgeInstalled
+        let previousGeneration = interpreterGeneration
+        let previousRevision = publishedRevision
         resetInterpreterScope()
         currentScenePhase = scenePhase
         let rootView: RuntimeViewNode
         do {
+            let bootstrap = try appSourceBootstrapper.prepare(
+                sourceSnapshot.source, rootTypeName: entryPoint.rootViewTypeName
+            )
+            if !bootstrap.isEmpty {
+                _ = try await evaluateLocked(bootstrap, resetInterpreter: false)
+            }
             rootView = try await lowerViewBodyInCurrentScope(
                 in: sourceSnapshot.source,
                 typeName: entryPoint.rootViewTypeName
@@ -493,6 +507,8 @@ public actor InterpreterKernel {
             currentScenePhase = previousScenePhase
             interpreterScenePhase = previousInterpreterScenePhase
             interpreterDismissBridgeInstalled = previousDismissBridgeInstalled
+            interpreterGeneration = previousGeneration
+            publishedRevision = previousRevision
             throw error
         }
         return InterpretedAppViewSnapshot(
@@ -524,6 +540,32 @@ public actor InterpreterKernel {
             rootView: rootView,
             scenePhase: scenePhase
         )
+    }
+
+    /// Receives a revision after an interpreted @Published property changes.
+    /// The host can coalesce revisions and refresh its current app snapshot.
+    public func publishedChanges() -> AsyncStream<UInt64> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<UInt64>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        publishedObservers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removePublishedObserver(id) }
+        }
+        return stream
+    }
+
+    private func removePublishedObserver(_ id: UUID) {
+        publishedObservers.removeValue(forKey: id)
+    }
+
+    private func publishedChange(generation: UUID) {
+        guard interpreterGeneration == generation else { return }
+        publishedRevision &+= 1
+        for continuation in publishedObservers.values {
+            continuation.yield(publishedRevision)
+        }
     }
 
     /// Evaluates source inside this project's sandbox and captures `print` output.
@@ -727,6 +769,12 @@ public actor InterpreterKernel {
     private func resetInterpreterScope() {
         interpreter = Interpreter()
         interpreter.registerOnImport("Security", module: ProjectKeychainModule(projectID: workspace.id, backend: keychainBackend))
+        interpreterGeneration = UUID()
+        let generation = interpreterGeneration
+        interpreter.registerGlobal(name: "__swiftpouch_publishedChange") { [weak self] _ in
+            await self?.publishedChange(generation: generation)
+            return .void
+        }
         optionalVariableTypes.removeAll()
         initializedViewStateOwners.removeAll()
         registeredRuntimeActions.removeAll()

@@ -7,6 +7,21 @@ import SwiftSyntax
 /// Projected child bindings are preserved when they are forwarded again.
 struct CustomViewSourceExpander: Sendable {
     private let bodySourceEditor = ViewBodySourceEditor()
+    private let viewSwitchSourceEditor = ViewSwitchSourceEditor()
+
+    func stateDeclarations(in source: String) throws -> [(typeName: String, declarations: [ViewStateDeclaration])] {
+        let syntax = Parser.parse(source: source)
+        guard !syntax.hasError else { throw RuntimeViewLoweringError.malformedSyntax }
+        return try syntax.statements.compactMap { statement in
+            guard let type = statement.item.as(DeclSyntax.self)?.as(StructDeclSyntax.self),
+                  type.inheritanceClause?.inheritedTypes.contains(where: {
+                      $0.type.trimmedDescription == "View"
+                          || $0.type.trimmedDescription.hasSuffix(".View")
+                  }) == true else { return nil }
+            let body = try bodySourceEditor.extract(in: source, typeName: type.name.text)
+            return (type.name.text, body.stateDeclarations)
+        }
+    }
 
     func expand(
         _ expression: String,
@@ -34,7 +49,9 @@ struct CustomViewSourceExpander: Sendable {
         }
         let rootBody = try bodySourceEditor.extract(in: source, typeName: rootTypeName)
         let rootHelpers = try helperValues(in: rootDeclaration, extractedBody: rootBody)
-        let withoutBuilderLets = try expandBuilderLets(in: expression)
+        let withoutBuilderLets = try expandBuilderLets(
+            in: viewSwitchSourceEditor.expand(in: expression)
+        )
         let withRootHelpers = try substituting(rootHelpers, into: withoutBuilderLets)
 
         return try expand(
@@ -125,6 +142,13 @@ struct CustomViewSourceExpander: Sendable {
                 source: source
             )
             let arguments = try argumentValues(for: customCall.syntax, definition: definition)
+            let objectNames = Set(definition.inputs.filter { $0.replacementName != $0.name }
+                .map(\.replacementName))
+            if let missing = definition.objectDeclarations.first(where: {
+                !objectNames.contains($0.storageName)
+            }) {
+                throw unsupportedCustomView(customCall.name, "@StateObject \(missing.name) needs app object initialization")
+            }
             let instantiatedBody = try substituting(
                 arguments,
                 into: substituting(definition.helpers, into: definition.body)
@@ -167,12 +191,6 @@ struct CustomViewSourceExpander: Sendable {
         }
 
         let extractedBody = try bodySourceEditor.extract(in: source, typeName: name)
-        guard extractedBody.stateDeclarations.isEmpty else {
-            throw RuntimeViewLoweringError.unsupportedExpression(
-                "custom view \(name) cannot declare property-wrapped state in this step"
-            )
-        }
-
         var inputs: [CustomViewInput] = []
         for member in declaration.memberBlock.members {
             if let variable = member.decl.as(VariableDeclSyntax.self) {
@@ -206,6 +224,29 @@ struct CustomViewSourceExpander: Sendable {
                     }
                     // Supported environment properties are inherited from the
                     // host context; they are not synthesized initializer inputs.
+                    continue
+                }
+                if wrapperNames.contains("State") {
+                    guard wrapperNames == ["State"] else {
+                        throw unsupportedCustomView(name, "@State cannot be combined with other wrappers")
+                    }
+                    continue
+                }
+                if wrapperNames.contains("ObservedObject") {
+                    guard wrapperNames == ["ObservedObject"],
+                          variable.bindingSpecifier.text == "var",
+                          variable.bindings.count == 1,
+                          let binding = variable.bindings.first,
+                          let identifier = binding.pattern.as(IdentifierPatternSyntax.self),
+                          binding.initializer == nil, binding.accessorBlock == nil,
+                          let object = extractedBody.objectDeclarations.first(where: {
+                              $0.name == identifier.identifier.text
+                          }) else {
+                        throw unsupportedCustomView(name, "@ObservedObject needs one stored initializer input")
+                    }
+                    inputs.append(CustomViewInput(
+                        name: object.name, replacementName: object.storageName, kind: .value
+                    ))
                     continue
                 }
                 if wrapperNames.contains("Binding") {
@@ -265,8 +306,9 @@ struct CustomViewSourceExpander: Sendable {
 
         return CustomViewDefinition(
             inputs: inputs,
-            body: try expandBuilderLets(in: extractedBody.expression),
-            helpers: try helperValues(in: declaration, extractedBody: extractedBody)
+            body: try expandBuilderLets(in: viewSwitchSourceEditor.expand(in: extractedBody.expression)),
+            helpers: try helperValues(in: declaration, extractedBody: extractedBody),
+            objectDeclarations: extractedBody.objectDeclarations
         )
     }
 
@@ -346,17 +388,19 @@ struct CustomViewSourceExpander: Sendable {
                let binding = variable.bindings.first,
                let identifier = binding.pattern.as(IdentifierPatternSyntax.self),
                identifier.identifier.text != "body",
-               binding.accessorBlock != nil,
-               !variable.attributes.contains(where: { element in
+               binding.accessorBlock != nil {
+                let isBuilder = variable.attributes.contains(where: { element in
                    guard case .attribute(let attribute) = element else { return false }
-                   return attribute.attributeName.trimmedDescription == "ViewBuilder"
-               }) {
+                   return attribute.attributeName.trimmedDescription.split(separator: ".").last == "ViewBuilder"
+                })
                 let statements = try bodySourceEditor.getterStatements(
                     for: binding,
                     typeName: declaration.name.text
                 )
                 let expression: String
-                if statements.count == 1,
+                if isBuilder {
+                    expression = "Group {\n\(statements.description)\n}"
+                } else if statements.count == 1,
                    let item = statements.first?.item.as(ExprSyntax.self) {
                     expression = "(\(item.trimmedDescription))"
                 } else if statements.count == 1,
@@ -366,9 +410,11 @@ struct CustomViewSourceExpander: Sendable {
                     expression = "({\n\(statements.description)\n})()"
                 }
                 raw[identifier.identifier.text] = CustomViewArgumentValue(
-                    expression: try bodySourceEditor.rewriteMemberReferences(
-                        in: expression, from: extractedBody
-                    ),
+                    expression: try expandBuilderLets(in: viewSwitchSourceEditor.expand(
+                        in: bodySourceEditor.rewriteMemberReferences(
+                            in: expression, from: extractedBody
+                        )
+                    )),
                     supportsProjection: false
                 )
             } else if let function = member.decl.as(FunctionDeclSyntax.self),
@@ -446,7 +492,7 @@ struct CustomViewSourceExpander: Sendable {
                         "custom view @Binding input \(input.name) must receive a direct $state projection"
                     )
                 }
-                values[input.name] = CustomViewArgumentValue(
+                values[input.replacementName] = CustomViewArgumentValue(
                     expression: projectedName,
                     supportsProjection: true
                 )
@@ -455,11 +501,11 @@ struct CustomViewSourceExpander: Sendable {
                         || argument.expression.as(DeclReferenceExprSyntax.self) != nil else {
                     throw RuntimeViewLoweringError.unsupportedArgument("custom view callback \(input.name)")
                 }
-                values[input.name] = CustomViewArgumentValue(
+                values[input.replacementName] = CustomViewArgumentValue(
                     expression: expression, supportsProjection: false, isCallable: true
                 )
             } else {
-                values[input.name] = CustomViewArgumentValue(
+                values[input.replacementName] = CustomViewArgumentValue(
                     expression: isAtomicValueExpression(argument.expression)
                         ? expression : "(\(expression))",
                     supportsProjection: false
@@ -562,11 +608,19 @@ private struct CustomViewDefinition {
     let inputs: [CustomViewInput]
     let body: String
     let helpers: [String: CustomViewArgumentValue]
+    let objectDeclarations: [ViewObjectDeclaration]
 }
 
 private struct CustomViewInput {
     let name: String
+    let replacementName: String
     let kind: Kind
+
+    init(name: String, replacementName: String? = nil, kind: Kind) {
+        self.name = name
+        self.replacementName = replacementName ?? name
+        self.kind = kind
+    }
 
     enum Kind: Equatable {
         case value

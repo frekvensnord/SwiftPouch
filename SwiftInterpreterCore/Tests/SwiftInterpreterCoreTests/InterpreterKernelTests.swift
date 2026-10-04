@@ -2172,6 +2172,101 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(refreshedChildren[0], .text("Changed"))
     }
 
+    func testAppBootstrapSharesOwnedObjectsAndExpandsBuilderHelpers() async throws {
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SwiftInterpreterObservableApp-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
+        let sourceURL = temporaryRoot.appendingPathComponent("ObservableApp.swift")
+        let workspace = try ProjectWorkspaceStore(
+            rootURL: temporaryRoot.appendingPathComponent("Workspaces", isDirectory: true)
+        ).workspace(for: ProjectID())
+        let kernel = InterpreterKernel(workspace: workspace)
+        let source = """
+        import SwiftUI
+        enum Login { case connected, failed(String) }
+        final class Session: ObservableObject {
+            @Published var state: Login = .connected
+            func fail() { state = .failed("Expired") }
+        }
+        final class Store: ObservableObject {
+            @Published var title = "First"
+            let session: Session
+            init(session: Session) { self.session = session }
+            func change() { title = "Changed"; session.fail() }
+        }
+        @main struct ObservableApp: App {
+            var body: some Scene { WindowGroup { ContentView() } }
+        }
+        struct ContentView: View {
+            @StateObject private var session: Session
+            @StateObject private var store: Store
+            init() {
+                let session = Session()
+                _session = StateObject(wrappedValue: session)
+                _store = StateObject(wrappedValue: Store(session: session))
+            }
+            var body: some View {
+                VStack {
+                    Text(store.title)
+                    conversationBody
+                    SettingsView(store: store, session: session)
+                    Button("Change") { store.change() }
+                }
+            }
+            @ViewBuilder private var conversationBody: some View {
+                if store.title == "Changed" {
+                    Text("Updated")
+                } else {
+                    Text("Waiting")
+                }
+            }
+        }
+        struct SettingsView: View {
+            @ObservedObject var store: Store
+            @ObservedObject var session: Session
+            @State private var note = "Stable"
+            var body: some View {
+                VStack {
+                    Text(store.title)
+                    Text(note)
+                    authSummary
+                }
+            }
+            @ViewBuilder private var authSummary: some View {
+                switch session.state {
+                case .connected: Text("Connected")
+                case .failed(let message): Text(message)
+                }
+            }
+        }
+        """
+        try Data(source.utf8).write(to: sourceURL)
+        _ = try await kernel.linkSourceFile(at: sourceURL)
+        let first = try await kernel.reloadAndRunApp()
+        XCTAssertEqual(textValues(in: first.rootView), [
+            "First", "Waiting", "First", "Stable", "Connected"
+        ])
+
+        let changes = await kernel.publishedChanges()
+        guard case .verticalStack(_, _, let children) = first.rootView,
+              case .button(_, let changeAction, _) = children.last else {
+            return XCTFail("Expected the shared Store action")
+        }
+        _ = try await kernel.performAction(changeAction)
+        var iterator = changes.makeAsyncIterator()
+        let revision = await iterator.next()
+        XCTAssertNotNil(revision)
+        let refreshed = try await kernel.refreshAppView(first)
+        XCTAssertEqual(textValues(in: refreshed.rootView), [
+            "Changed", "Updated", "Changed", "Stable", "Expired"
+        ])
+        let reloaded = try await kernel.reloadAndRunApp()
+        XCTAssertEqual(textValues(in: reloaded.rootView), [
+            "First", "Waiting", "First", "Stable", "Connected"
+        ])
+    }
+
     func testFailedAppReloadRetainsThePreviousStateAndActions() async throws {
         let temporaryRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("SwiftInterpreterFailedReloadTests-\(UUID().uuidString)", isDirectory: true)

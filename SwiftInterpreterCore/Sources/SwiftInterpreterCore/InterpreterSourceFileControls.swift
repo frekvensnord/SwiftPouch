@@ -22,6 +22,7 @@ public struct InterpreterSourceFileControls: View {
     @State private var isFileImporterPresented = false
     @State private var isWorking = false
     @State private var pendingScenePhase: RuntimeScenePhase?
+    @State private var pendingPublishedRefresh = false
     @State private var pendingInputChanges: [RuntimeInputID: String] = [:]
     @State private var pendingPresentationChanges: [RuntimeInputID: Bool] = [:]
     @State private var inputCommitTask: Task<Void, Never>?
@@ -97,6 +98,12 @@ public struct InterpreterSourceFileControls: View {
         )
         .onAppear {
             Task { await refreshLinkedFile() }
+        }
+        .task {
+            for await _ in await kernel.publishedChanges() {
+                pendingPublishedRefresh = true
+                await refreshPendingPublishedIfPossible()
+            }
         }
         .onChange(of: hostScenePhase) { newPhase in
             pendingScenePhase = Self.runtimeScenePhase(for: newPhase)
@@ -296,6 +303,24 @@ public struct InterpreterSourceFileControls: View {
             }
             isWorking = false
         }
+        await refreshPendingPublishedIfPossible()
+    }
+
+    private func refreshPendingPublishedIfPossible() async {
+        guard !isWorking, pendingPublishedRefresh,
+              let snapshot = appViewSnapshot else { return }
+        pendingPublishedRefresh = false
+        isWorking = true
+        do {
+            appViewSnapshot = try await kernel.refreshAppView(
+                snapshot,
+                scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isWorking = false
+        if pendingPublishedRefresh { await refreshPendingPublishedIfPossible() }
     }
 
     private static func runtimeScenePhase(for scenePhase: ScenePhase) -> RuntimeScenePhase {

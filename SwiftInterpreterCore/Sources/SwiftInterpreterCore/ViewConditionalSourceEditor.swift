@@ -19,9 +19,12 @@ struct ViewConditionalSourceEditor {
         visitor.walk(syntaxTree)
         guard let conditional = visitor.conditional else { return nil }
         let clauses = try viewConditionalClauses(in: conditional.conditions)
-        let bindings = clauses.compactMap { clause -> ViewConditionalBinding? in
-            guard case .optionalBinding(let binding) = clause else { return nil }
-            return binding
+        let bindings = clauses.flatMap { clause -> [ViewConditionalBinding] in
+            switch clause {
+            case .optionalBinding(let binding): return [binding]
+            case .matchingPattern(let values): return values
+            case .expression: return []
+            }
         }
         let simpleConditionExpression: String?
         if conditional.conditions.count == 1,
@@ -90,9 +93,12 @@ func viewBuilderConditional(in item: CodeBlockItemSyntax.Item) -> IfExprSyntax? 
 }
 
 func viewConditionalBindings(in conditions: ConditionElementListSyntax) throws -> [ViewConditionalBinding] {
-    try viewConditionalClauses(in: conditions).compactMap { clause in
-        guard case .optionalBinding(let binding) = clause else { return nil }
-        return binding
+    try viewConditionalClauses(in: conditions).flatMap { clause -> [ViewConditionalBinding] in
+        switch clause {
+        case .optionalBinding(let binding): return [binding]
+        case .matchingPattern(let bindings): return bindings
+        case .expression: return []
+        }
     }
 }
 
@@ -120,6 +126,18 @@ func viewConditionalClauses(in conditions: ConditionElementListSyntax) throws ->
                     typeAnnotation: typeAnnotation
                 )
             ))
+        case .matchingPattern(let match):
+            let names = MatchingPatternNameVisitor()
+            names.walk(match.pattern)
+            let pattern = match.pattern.trimmedDescription
+            let subject = match.initializer.value.trimmedDescription
+            clauses.append(.matchingPattern(names.names.map { name in
+                ViewConditionalBinding(
+                    name: name,
+                    initializer: "(if case \(pattern) = \(subject) { \(name) } else { nil })",
+                    typeAnnotation: ""
+                )
+            }))
         default:
             throw RuntimeViewLoweringError.unsupportedExpression(
                 "conditional clause is not supported: \(condition.trimmedDescription)"
@@ -132,6 +150,17 @@ func viewConditionalClauses(in conditions: ConditionElementListSyntax) throws ->
 enum ViewConditionalClause: Sendable, Hashable {
     case expression(String)
     case optionalBinding(ViewConditionalBinding)
+    case matchingPattern([ViewConditionalBinding])
+}
+
+private final class MatchingPatternNameVisitor: SyntaxVisitor {
+    private(set) var names: [String] = []
+    init() { super.init(viewMode: .sourceAccurate) }
+    override func visit(_ node: IdentifierPatternSyntax) -> SyntaxVisitorContinueKind {
+        let name = node.identifier.text
+        if name != "_" && !names.contains(name) { names.append(name) }
+        return .skipChildren
+    }
 }
 
 struct ViewConditionalBinding: Sendable, Hashable {

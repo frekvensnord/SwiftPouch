@@ -8,6 +8,13 @@ struct ViewStateDeclaration: Sendable {
     let initializer: String
 }
 
+struct ViewObjectDeclaration: Sendable {
+    let name: String
+    let storageName: String
+    let initializer: String?
+    let isOwned: Bool
+}
+
 struct ViewEnvironmentDeclaration: Sendable {
     let name: String
     let storageName: String
@@ -22,6 +29,7 @@ enum ViewEnvironmentKey: Equatable, Sendable {
 struct ExtractedViewBody: Sendable {
     let expression: String
     let stateDeclarations: [ViewStateDeclaration]
+    let objectDeclarations: [ViewObjectDeclaration]
     let environmentDeclarations: [ViewEnvironmentDeclaration]
 }
 
@@ -35,8 +43,12 @@ struct ViewBodySourceEditor: Sendable {
             in: expression,
             declarations: body.stateDeclarations
         )
-        return try rewriteEnvironmentReferences(
+        let withObjects = try rewriteObjectReferences(
             in: withState,
+            declarations: body.objectDeclarations
+        )
+        return try rewriteEnvironmentReferences(
+            in: withObjects,
             declarations: body.environmentDeclarations
         )
     }
@@ -109,9 +121,18 @@ struct ViewBodySourceEditor: Sendable {
         }
 
         let stateDeclarations = try viewStateDeclarations(in: typeDeclaration, typeName: typeName)
+        let objectDeclarations = try viewObjectDeclarations(in: typeDeclaration, typeName: typeName)
         let environmentDeclarations = try viewEnvironmentDeclarations(in: typeDeclaration, typeName: typeName)
         let stateNames = Set(stateDeclarations.map(\.name))
-        if let duplicateName = environmentDeclarations.map(\.name).first(where: { stateNames.contains($0) }) {
+        let objectNames = Set(objectDeclarations.map(\.name))
+        if let duplicateName = objectDeclarations.map(\.name).first(where: { stateNames.contains($0) }) {
+            throw RuntimeViewLoweringError.unsupportedExpression(
+                "view property \(duplicateName) has more than one supported property wrapper in \(typeName)"
+            )
+        }
+        if let duplicateName = environmentDeclarations.map(\.name).first(where: {
+            stateNames.contains($0) || objectNames.contains($0)
+        }) {
             throw RuntimeViewLoweringError.unsupportedExpression(
                 "view property \(duplicateName) has more than one supported property wrapper in \(typeName)"
             )
@@ -121,14 +142,54 @@ struct ViewBodySourceEditor: Sendable {
             in: expression,
             declarations: stateDeclarations
         )
+        let objectRewrittenExpression = try rewriteObjectReferences(
+            in: stateRewrittenExpression,
+            declarations: objectDeclarations
+        )
         return ExtractedViewBody(
             expression: try rewriteEnvironmentReferences(
-                in: stateRewrittenExpression,
+                in: objectRewrittenExpression,
                 declarations: environmentDeclarations
             ),
             stateDeclarations: stateDeclarations,
+            objectDeclarations: objectDeclarations,
             environmentDeclarations: environmentDeclarations
         )
+    }
+
+    private func viewObjectDeclarations(
+        in typeDeclaration: StructDeclSyntax,
+        typeName: String
+    ) throws -> [ViewObjectDeclaration] {
+        var result: [ViewObjectDeclaration] = []
+        var names = Set<String>()
+        for member in typeDeclaration.memberBlock.members {
+            guard let variable = member.decl.as(VariableDeclSyntax.self) else { continue }
+            let wrappers = variable.attributes.compactMap { element -> String? in
+                guard case .attribute(let attribute) = element else { return nil }
+                return attribute.attributeName.trimmedDescription.split(separator: ".").last.map(String.init)
+            }
+            guard wrappers.contains("StateObject") || wrappers.contains("ObservedObject") else { continue }
+            guard wrappers.count == 1, variable.bindingSpecifier.text == "var",
+                  variable.bindings.count == 1, let binding = variable.bindings.first,
+                  let identifier = binding.pattern.as(IdentifierPatternSyntax.self),
+                  binding.accessorBlock == nil else {
+                throw RuntimeViewLoweringError.unsupportedExpression(
+                    "observable property in \(typeName) must be one stored mutable property"
+                )
+            }
+            let name = identifier.identifier.text
+            guard names.insert(name).inserted else {
+                throw RuntimeViewLoweringError.unsupportedExpression("duplicate observable property \(name)")
+            }
+            result.append(ViewObjectDeclaration(
+                name: name,
+                storageName: objectStorageName(ownerTypeName: typeName, propertyName: name),
+                initializer: binding.initializer?.value.trimmedDescription,
+                isOwned: wrappers.contains("StateObject")
+            ))
+        }
+        return result
     }
 
     private func viewEnvironmentDeclarations(
@@ -309,6 +370,21 @@ struct ViewBodySourceEditor: Sendable {
         )
     }
 
+    private func rewriteObjectReferences(
+        in expression: String,
+        declarations: [ViewObjectDeclaration]
+    ) throws -> String {
+        guard !declarations.isEmpty else { return expression }
+        return try rewriteViewPropertyReferences(
+            in: expression,
+            replacementsByName: Dictionary(uniqueKeysWithValues: declarations.map {
+                ($0.name, $0.storageName)
+            }),
+            projectedReferencesAllowed: true,
+            propertyWrapperName: "@StateObject/@ObservedObject"
+        )
+    }
+
     private func rewriteEnvironmentReferences(
         in expression: String,
         declarations: [ViewEnvironmentDeclaration]
@@ -407,6 +483,16 @@ struct ViewBodySourceEditor: Sendable {
             }.joined()
         }
         return "__swiftpouch_state_\(hex(ownerTypeName))_\(hex(propertyName))"
+    }
+
+    private func objectStorageName(ownerTypeName: String, propertyName: String) -> String {
+        let digits = Array("0123456789abcdef")
+        func hex(_ value: String) -> String {
+            value.utf8.map { byte in
+                String([digits[Int(byte >> 4)], digits[Int(byte & 0x0f)]])
+            }.joined()
+        }
+        return "__swiftpouch_object_\(hex(ownerTypeName))_\(hex(propertyName))"
     }
 
     func getterStatements(
