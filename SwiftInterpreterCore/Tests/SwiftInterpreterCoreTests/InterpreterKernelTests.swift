@@ -151,6 +151,12 @@ final class InterpreterKernelTests: XCTestCase {
         guard case .modified(_, modifier: .itemSheet(_, let reopenedInputID, _)) = reopened else {
             return XCTFail("Expected reopened item sheet")
         }
+        try await kernel.setPresentation(reopenedInputID, isPresented: true)
+        let stillPresented = try await kernel.lowerViewExpression(source)
+        guard case .modified(_, modifier: .itemSheet(let current?, _, _)) = stillPresented else {
+            return XCTFail("Writing the current item must not clear its binding")
+        }
+        XCTAssertEqual(current.id, RuntimeForEachID(rawValue: "6:String7:login-2"))
         try await kernel.setPresentation(reopenedInputID, isPresented: false)
         let challengeState = try await kernel.evaluate("challenge == nil")
         XCTAssertEqual(challengeState.value, "true")
@@ -217,6 +223,29 @@ final class InterpreterKernelTests: XCTestCase {
         _ = try await kernel.performAction(actionID)
         let flushes = try await kernel.evaluate("flushes")
         XCTAssertEqual(flushes.value, "1")
+    }
+
+    func testOnChangeConnectionEnumMatchesItsImplicitCase() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        enum Connection { case signedOut; case connected }
+        var state = Connection.signedOut
+        var refreshes = 0
+        """)
+        let source = """
+        Text("Modell").onChange(of: state) { current in
+            if current == .connected { refreshes += 1 }
+        }
+        """
+        _ = try await kernel.lowerViewExpression(source)
+        _ = try await kernel.evaluate("state = Connection.connected")
+        let refreshed = try await kernel.lowerViewExpression(source)
+        guard case .modified(_, modifier: .onChange(_, let actionID)) = refreshed else {
+            return XCTFail("Expected connection change action")
+        }
+        _ = try await kernel.performAction(actionID)
+        let result = try await kernel.evaluate("refreshes")
+        XCTAssertEqual(result.value, "1")
     }
 
     func testDeviceLinkTracksCurrentDestination() async throws {

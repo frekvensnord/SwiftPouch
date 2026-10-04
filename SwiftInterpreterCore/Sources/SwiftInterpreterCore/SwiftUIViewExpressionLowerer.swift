@@ -1144,12 +1144,34 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
 
     private func recordViewAction(_ closure: ClosureExprSyntax, at call: FunctionCallExprSyntax) throws -> RuntimeActionID {
         let action = closure.statements.description.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prepared = try ViewScrollSourceEditor.rewriteAction(
+        var prepared = try ViewScrollSourceEditor.rewriteAction(
             action, context: ViewScrollSourceEditor.context(enclosing: call)
         )
         let offset = call.positionAfterSkippingLeadingTrivia.utf8Offset
+        let captured = forEachBindingsByActionOffset[offset] ?? []
+        // The script interpreter cannot infer an enum type from a value passed
+        // into a generated closure. Qualify implicit cases used in the target's
+        // `.onChange` comparisons (scene phase and connection state).
+        for binding in captured {
+            guard case .enumValue(let typeName, _, _) = binding.value,
+                  Self.validIdentifier(typeName) else { continue }
+            let name = NSRegularExpression.escapedPattern(for: binding.name)
+            let cases = "([A-Za-z_][A-Za-z_0-9]*)"
+            let right = try NSRegularExpression(pattern: "(\\b\(name)\\s*(?:==|!=)\\s*)\\.\(cases)\\b")
+            prepared = right.stringByReplacingMatches(
+                in: prepared,
+                range: NSRange(prepared.startIndex..<prepared.endIndex, in: prepared),
+                withTemplate: "$1\(typeName).$2"
+            )
+            let left = try NSRegularExpression(pattern: "\\.\(cases)\\s*(==|!=)\\s*(\\b\(name)\\b)")
+            prepared = left.stringByReplacingMatches(
+                in: prepared,
+                range: NSRange(prepared.startIndex..<prepared.endIndex, in: prepared),
+                withTemplate: "\(typeName).$1 $2 $3"
+            )
+        }
         return actionRecorder?.record(
-            prepared, forEachBindings: forEachBindingsByActionOffset[offset] ?? []
+            prepared, forEachBindings: captured
         ) ?? RuntimeActionID()
     }
 

@@ -604,7 +604,9 @@ public actor InterpreterKernel {
             let replacement: Value
             switch value {
             case .bool: replacement = .bool(isPresented)
-            case .optional: replacement = .optional(nil)
+            case .optional:
+                guard !isPresented else { return }
+                replacement = .optional(nil)
             default: throw RuntimeViewLoweringError.unsupportedArgument("presentation requires Bool or Optional state")
             }
             guard interpreter.rootScope.assign(name, value: replacement) else {

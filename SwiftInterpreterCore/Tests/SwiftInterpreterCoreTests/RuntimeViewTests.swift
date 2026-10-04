@@ -54,11 +54,12 @@ final class RuntimeViewTests: XCTestCase {
         }
         """)
         guard case .navigationStack(.modified(content: .list(.modified(content: .text("Ein Chat"),
-                modifier: .swipeActions(.button(_, let deleteID, .destructive)))),
+                modifier: .swipeActions(.button(_, let deleteID, let deleteRole)))),
                 modifier: .listStyleInsetGrouped)) = view.node else {
             return XCTFail("Expected native history list and swipe deletion")
         }
         XCTAssertNotNil(view.actions[deleteID])
+        XCTAssertEqual(deleteRole, .destructive)
         let link = try SwiftUIViewExpressionLowerer().lower("""
         Link(destination: "https://example.com/device") {
             Label("Anmeldeseite öffnen", systemImage: "arrow.up.right.square")
