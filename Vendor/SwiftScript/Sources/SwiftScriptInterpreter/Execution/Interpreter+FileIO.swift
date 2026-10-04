@@ -61,6 +61,35 @@ extension Interpreter {
         labels: [String?]? = nil
     ) async throws -> Value {
         switch name {
+        case "urls":
+            guard args.count == 2 else {
+                throw RuntimeError.invalid("FileManager.urls(for:in:): expected 2 arguments")
+            }
+            let directory: FileManager.SearchPathDirectory = try unboxOpaque(
+                args[0], as: FileManager.SearchPathDirectory.self,
+                typeName: "FileManager.SearchPathDirectory"
+            )
+            let domain: FileManager.SearchPathDomainMask = try unboxOpaque(
+                args[1], as: FileManager.SearchPathDomainMask.self,
+                typeName: "FileManager.SearchPathDomainMask"
+            )
+            if ShellKit.Shell.current.sandbox != nil {
+                guard directory == .applicationSupportDirectory,
+                      domain == .userDomainMask else {
+                    throw RuntimeError.invalid("FileManager.urls(for:in:): unavailable in the project workspace")
+                }
+                let home = URL(
+                    fileURLWithPath: ShellKit.Shell.displayPath(for: ShellKit.Shell.homeDirectory),
+                    isDirectory: true
+                )
+                let support = home
+                    .appendingPathComponent("Library", isDirectory: true)
+                    .appendingPathComponent("Application Support", isDirectory: true)
+                return .array([boxOpaque(support, typeName: "URL")])
+            }
+            return .array(FileManager.default.urls(for: directory, in: domain).map {
+                boxOpaque($0, typeName: "URL")
+            })
         case "fileExists":
             try expectStringArg(args, methodName: "FileManager.fileExists(atPath:)")
             if case .string(let path) = args[0] {

@@ -2530,6 +2530,100 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(result.value, "abc|true|3")
     }
 
+    func testTargetPersistenceRoundTripsWithinProjectAndSurvivesKernelRestart() async throws {
+        let workspace = try makeWorkspace()
+        let declarations = #"""
+        import Foundation
+        struct ChatPreferences: Codable { var selectedModelID: String? }
+        struct ChatIndex: Codable {
+            var conversationIDs: [UUID]
+            var activeConversationID: UUID?
+            var preferences: ChatPreferences
+        }
+        struct ChatConversation: Codable { var id: UUID; var title: String }
+        final class JSONChatPersistence {
+            private let rootURL: URL
+            private let fileManager = FileManager.default
+            init(rootURL: URL) { self.rootURL = rootURL }
+
+            static func makeDefault() -> JSONChatPersistence {
+                let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                return JSONChatPersistence(rootURL: support.appendingPathComponent("SwiftChat", isDirectory: true))
+            }
+            func loadIndex() throws -> ChatIndex {
+                let url = rootURL.appendingPathComponent("index.json")
+                return try JSONDecoder().decode(ChatIndex.self, from: Data(contentsOf: url))
+            }
+            func saveIndex(_ index: ChatIndex) throws {
+                try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(index)
+                try data.write(to: rootURL.appendingPathComponent("index.json"), options: .atomic)
+            }
+            func loadConversation(id: UUID) throws -> ChatConversation? {
+                let url = rootURL.appendingPathComponent("Conversations", isDirectory: true)
+                    .appendingPathComponent("conversation-\(id.uuidString).json")
+                guard fileManager.fileExists(atPath: url.path) else { return nil }
+                return try JSONDecoder().decode(ChatConversation.self, from: Data(contentsOf: url))
+            }
+            func saveConversation(_ conversation: ChatConversation) throws {
+                let folder = rootURL.appendingPathComponent("Conversations", isDirectory: true)
+                try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(conversation)
+                try data.write(to: folder.appendingPathComponent("conversation-\(conversation.id.uuidString).json"), options: .atomic)
+            }
+            func deleteConversation(id: UUID) throws {
+                let url = rootURL.appendingPathComponent("Conversations", isDirectory: true)
+                    .appendingPathComponent("conversation-\(id.uuidString).json")
+                if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
+            }
+        }
+        """#
+        let id = "a179b210-1abd-41a8-8c84-4e5430ac143c"
+        let first = InterpreterKernel(workspace: workspace)
+        let saved = try await first.evaluate(declarations + #"""
+        let persistence = JSONChatPersistence.makeDefault()
+        let id = UUID(uuidString: "a179b210-1abd-41a8-8c84-4e5430ac143c")!
+        try persistence.saveIndex(ChatIndex(conversationIDs: [id], activeConversationID: id, preferences: ChatPreferences(selectedModelID: "gpt")))
+        try persistence.saveConversation(ChatConversation(id: id, title: "Erster Chat"))
+        try persistence.loadConversation(id: id) != nil
+        """#)
+        XCTAssertEqual(saved.value, "true")
+
+        let supportURL = workspace.rootURL
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+            .appendingPathComponent("SwiftChat", isDirectory: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: supportURL.appendingPathComponent("index.json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: supportURL.appendingPathComponent("Conversations/conversation-\(id.uppercased()).json").path))
+
+        let reopened = InterpreterKernel(workspace: workspace)
+        let loaded = try await reopened.evaluate(declarations + #"""
+        let persistence = JSONChatPersistence.makeDefault()
+        let id = UUID(uuidString: "a179b210-1abd-41a8-8c84-4e5430ac143c")!
+        let index = try persistence.loadIndex()
+        let conversation = try persistence.loadConversation(id: id)!
+        try persistence.deleteConversation(id: id)
+        "\(index.conversationIDs[0] == id)|\(index.activeConversationID == id)|\(index.preferences.selectedModelID ?? "")|\(conversation.title)|\((try persistence.loadConversation(id: id)) == nil)"
+        """#)
+        XCTAssertEqual(loaded.value, "true|true|gpt|Erster Chat|true")
+    }
+
+    func testTargetPersistenceCannotWriteOutsideItsWorkspace() async throws {
+        let workspace = try makeWorkspace()
+        let outside = workspace.rootURL.deletingLastPathComponent().appendingPathComponent("outside.json")
+        let kernel = InterpreterKernel(workspace: workspace)
+        do {
+            _ = try await kernel.evaluate(#"""
+            import Foundation
+            let outside = URL.homeDirectory.deletingLastPathComponent().appendingPathComponent("outside.json")
+            try Data("blocked".utf8).write(to: outside, options: .atomic)
+            """#)
+            XCTFail("Atomic write outside the project should be denied")
+        } catch {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: outside.path))
+        }
+    }
+
     private func textValues(in node: RuntimeViewNode) -> [String] {
         switch node {
         case .text(let value):

@@ -43,6 +43,33 @@ public struct FoundationModule: BuiltinModule {
         registerNumericConversions(into: i)
         registerDataAppend(into: i)
         registerTargetDateFormatting(into: i)
+        registerChatPersistence(into: i)
+    }
+
+    private func registerChatPersistence(into i: Interpreter) {
+        i.bridges["static let FileManager.SearchPathDirectory.applicationSupportDirectory"] =
+            .staticValue(boxOpaque(
+                FileManager.SearchPathDirectory.applicationSupportDirectory,
+                typeName: "FileManager.SearchPathDirectory"
+            ))
+
+        // The generated Data bridge covers write(to:) but omits the
+        // options overload used for atomic JSON persistence.
+        i.bridges["func Data.write(to:options:)"] = .method { receiver, args in
+            guard args.count == 2,
+                  case .enumValue(_, caseName: "atomic", _) = args[1] else {
+                throw RuntimeError.invalid("Data.write(to:options:): expected .atomic")
+            }
+            let data: Data = try unboxOpaque(receiver, as: Data.self, typeName: "Data")
+            var destination: URL = try unboxOpaque(args[0], as: URL.self, typeName: "URL")
+            do {
+                destination = try await authorizePath(destination, for: .write)
+                try await data.write(to: destination, options: .atomic)
+                return .void
+            } catch {
+                throw UserThrowSignal(value: .opaque(typeName: "Error", value: error))
+            }
+        }
     }
 
     // The generated Date bridge exposes formatted() but not the labelled

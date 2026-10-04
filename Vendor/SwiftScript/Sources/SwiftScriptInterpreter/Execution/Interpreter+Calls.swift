@@ -352,10 +352,21 @@ extension Interpreter {
             let receiverIsBridged = { if case .opaque = receiver { return true }; return false }()
             var args: [Value] = []
             for arg in call.arguments {
+                let argumentContext: String?
+                if case .structValue(let typeName, _) = receiver,
+                   typeName == "FileManager", methodName == "urls" {
+                    switch arg.label?.text {
+                    case "for": argumentContext = "FileManager.SearchPathDirectory"
+                    case "in": argumentContext = "FileManager.SearchPathDomainMask"
+                    default: argumentContext = nil
+                    }
+                } else {
+                    argumentContext = implicitContext
+                }
                 args.append(try await evaluateArg(
                     arg.expression,
                     label: arg.label?.text,
-                    contextType: implicitContext,
+                    contextType: argumentContext,
                     in: scope,
                     deferToCallee: receiverIsBridged
                 ))
