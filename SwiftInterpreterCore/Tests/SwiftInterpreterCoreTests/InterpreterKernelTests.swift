@@ -192,6 +192,46 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(result.scrollRequest?.anchor, .bottom)
     }
 
+    func testOnChangeObservesHostScenePhaseAndRunsFlushAction() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var flushes = 0")
+        let source = """
+        struct RootView: View {
+            @Environment(\\.scenePhase) private var scenePhase
+            var body: some View {
+                Text("Chat").onChange(of: scenePhase) { phase in
+                    if phase != .active { flushes += 1 }
+                }
+            }
+        }
+        """
+        let active = try await kernel.lowerViewBody(in: source, typeName: "RootView", scenePhase: .active)
+        guard case .modified(_, modifier: .onChange(let activeValue, _)) = active else {
+            return XCTFail("Expected active scene event")
+        }
+        let inactive = try await kernel.lowerViewBody(in: source, typeName: "RootView", scenePhase: .inactive)
+        guard case .modified(_, modifier: .onChange(let inactiveValue, let actionID)) = inactive else {
+            return XCTFail("Expected updated scene event")
+        }
+        XCTAssertNotEqual(activeValue, inactiveValue)
+        _ = try await kernel.performAction(actionID)
+        let flushes = try await kernel.evaluate("flushes")
+        XCTAssertEqual(flushes.value, "1")
+    }
+
+    func testDeviceLinkTracksCurrentDestination() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var destination = \"https://example.com/device/one\"")
+        let source = "Link(destination: destination) { Text(\"Anmeldeseite öffnen\") }"
+        let first = try await kernel.lowerViewExpression(source)
+        XCTAssertEqual(first,
+                       .link(destination: "https://example.com/device/one", label: .text("Anmeldeseite öffnen")))
+        _ = try await kernel.evaluate("destination = \"https://example.com/device/two\"")
+        let second = try await kernel.lowerViewExpression(source)
+        XCTAssertEqual(second,
+                       .link(destination: "https://example.com/device/two", label: .text("Anmeldeseite öffnen")))
+    }
+
     func testNamedRootViewMethodIsPassedToComposerButton() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         _ = try await kernel.evaluate("var sent = \"\"")

@@ -269,12 +269,30 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             return try lowerMenu(call)
         case "Form":
             return try lowerContainer(call, name: name)
+        case "List":
+            guard call.arguments.isEmpty, call.additionalTrailingClosures.isEmpty,
+                  let closure = call.trailingClosure else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            return .list(try lowerViewBuilderStatements(closure.statements))
         case "Section":
             return try lowerContainer(call, name: name)
         case "Image":
             return try lowerImage(call)
         case "Label":
             return try lowerLabel(call)
+        case "Link":
+            guard call.arguments.count == 1, call.arguments.first?.label?.text == "destination",
+                  call.additionalTrailingClosures.isEmpty, let closure = call.trailingClosure,
+                  let destination = call.arguments.first else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            let address = try stringValue(destination.expression, viewName: name)
+            guard let url = URL(string: address), ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host != nil else {
+                throw RuntimeViewLoweringError.unsupportedArgument("Link destination")
+            }
+            return .link(destination: address, label: try lowerViewBuilderStatements(closure.statements))
         case "ProgressView":
             guard call.arguments.isEmpty, hasNoTrailingClosures(call) else {
                 throw RuntimeViewLoweringError.unsupportedArgument("ProgressView")
@@ -898,6 +916,15 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             }
             return .modified(content: content, modifier: .toolbar(items))
         }
+        if name == "swipeActions" {
+            guard call.arguments.isEmpty, call.additionalTrailingClosures.isEmpty,
+                  let closure = call.trailingClosure else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            return .modified(content: content, modifier: .swipeActions(
+                try lowerViewBuilderStatements(closure.statements)
+            ))
+        }
         if name == "sheet" {
             guard call.arguments.count == 1, call.additionalTrailingClosures.isEmpty,
                   let argument = call.arguments.first, let closure = call.trailingClosure else {
@@ -970,6 +997,18 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
                 throw RuntimeViewLoweringError.unsupportedArgument(name)
             }
             modifier = .presentationDragIndicatorVisible
+        case "listStyle":
+            guard call.arguments.count == 1,
+                  call.arguments.first.flatMap({ staticMemberName($0.expression) }) == "insetGrouped" else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            modifier = .listStyleInsetGrouped
+        case "textSelection":
+            guard call.arguments.count == 1,
+                  call.arguments.first.flatMap({ staticMemberName($0.expression) }) == "enabled" else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            modifier = .textSelectionEnabled
         case "tag":
             guard call.arguments.count == 1, let argument = call.arguments.first,
                   argument.label == nil else { throw RuntimeViewLoweringError.unsupportedArgument(name) }
@@ -1608,9 +1647,10 @@ private final class DynamicTextExpressionVisitor: SyntaxVisitor {
         }
         let called = node.calledExpression.trimmedDescription
         let modifier = node.calledExpression.as(MemberAccessExprSyntax.self)?.declName.baseName.text
-        guard ["Text", "Button", "TextField", "Picker", "Section", "Label", "Image"].contains(called) || modifier == "tag",
+        guard ["Text", "Button", "TextField", "Picker", "Section", "Label", "Image", "Link"].contains(called) || modifier == "tag",
               let argument = node.arguments.first,
-              (argument.label == nil || called == "Image" && argument.label?.text == "systemName"),
+              (argument.label == nil || called == "Image" && argument.label?.text == "systemName"
+               || called == "Link" && argument.label?.text == "destination"),
               (called != "Button" || node.trailingClosure != nil || node.arguments.contains(where: { $0.label?.text == "action" })),
               !isPlainStringLiteral(argument.expression) else {
             return .visitChildren

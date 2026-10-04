@@ -296,6 +296,9 @@ public enum RuntimeViewModifier: Codable, Equatable, Sendable {
     case alert(title: String, isPresented: Bool, inputID: RuntimeInputID, actions: RuntimeViewNode, message: RuntimeViewNode)
     case presentationDetentsMedium
     case presentationDragIndicatorVisible
+    case listStyleInsetGrouped
+    case swipeActions(RuntimeViewNode)
+    case textSelectionEnabled
     case onAppear(RuntimeActionID)
     case onChange(value: String, actionID: RuntimeActionID)
 }
@@ -321,6 +324,8 @@ public indirect enum RuntimeViewNode: Codable, Equatable, Sendable {
     case scrollView(axis: RuntimeScrollAxis, showsIndicators: Bool, content: RuntimeViewNode)
     case scrollViewReader(id: String, content: RuntimeViewNode)
     case navigationStack(RuntimeViewNode)
+    case list(RuntimeViewNode)
+    case link(destination: String, label: RuntimeViewNode)
     case lazyVerticalStack(
         alignment: RuntimeHorizontalAlignment,
         spacing: Double?,
@@ -481,6 +486,14 @@ public struct SwiftUIRuntimeRenderer: View {
             }
         case .navigationStack(let content):
             NavigationStack { render(content) }
+        case .list(let content):
+            List { render(content) }
+        case .link(let destination, let label):
+            if let url = URL(string: destination), ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
+                Link(destination: url) { render(label) }
+            } else {
+                render(label)
+            }
         case .lazyVerticalStack(let alignment, let spacing, let children):
             LazyVStack(alignment: horizontalAlignment(alignment), spacing: spacing.map { CGFloat($0) }) {
                 ForEach(children.indices, id: \.self) { index in
@@ -663,6 +676,16 @@ public struct SwiftUIRuntimeRenderer: View {
             #else
             render(content)
             #endif
+        case .listStyleInsetGrouped:
+            #if os(iOS)
+            render(content).listStyle(.insetGrouped)
+            #else
+            render(content)
+            #endif
+        case .swipeActions(let actions):
+            render(content).swipeActions { render(actions) }
+        case .textSelectionEnabled:
+            render(content).textSelection(.enabled)
         case .textInputAutocapitalizationNever:
             #if os(iOS)
             render(content).textInputAutocapitalization(.never)

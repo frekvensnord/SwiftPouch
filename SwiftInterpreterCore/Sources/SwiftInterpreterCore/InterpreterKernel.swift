@@ -161,7 +161,11 @@ public actor InterpreterKernel {
             return loweredView.node
         }
 
-        let textPlaceholders = Dictionary(uniqueKeysWithValues: allTextExpressions.map { ($0, "") })
+        // The same validation map also feeds dynamic Link destinations; use
+        // a syntactically valid URL while validating view structure only.
+        let textPlaceholders = Dictionary(uniqueKeysWithValues: allTextExpressions.map {
+            ($0, "https://swiftpouch.invalid")
+        })
         let conditionPlaceholders = Dictionary(uniqueKeysWithValues: dynamicConditions.map { ($0, false) })
         let disabledPlaceholders = Dictionary(uniqueKeysWithValues: dynamicDisabledExpressions.map { ($0, false) })
         let scrollIDPlaceholders = Dictionary(uniqueKeysWithValues: allScrollIDSites.map {

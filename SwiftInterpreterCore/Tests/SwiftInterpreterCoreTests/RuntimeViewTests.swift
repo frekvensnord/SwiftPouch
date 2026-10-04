@@ -40,6 +40,36 @@ final class RuntimeViewTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(RuntimeViewNode.self, from: JSONEncoder().encode(view.node)), view.node)
     }
 
+    func testHistorySwipeActionAndDeviceLinkUseNativeContainers() throws {
+        let view = try SwiftUIViewExpressionLowerer().lowerRecordingActions("""
+        NavigationStack {
+            List {
+                Text("Ein Chat").swipeActions {
+                    Button(role: .destructive) { print("delete") } label: {
+                        Label("Löschen", systemImage: "trash")
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+        }
+        """)
+        guard case .navigationStack(.modified(content: .list(.modified(content: .text("Ein Chat"),
+                modifier: .swipeActions(.button(_, let deleteID, .destructive)))),
+                modifier: .listStyleInsetGrouped)) = view.node else {
+            return XCTFail("Expected native history list and swipe deletion")
+        }
+        XCTAssertNotNil(view.actions[deleteID])
+        let link = try SwiftUIViewExpressionLowerer().lower("""
+        Link(destination: "https://example.com/device") {
+            Label("Anmeldeseite öffnen", systemImage: "arrow.up.right.square")
+        }
+        """)
+        XCTAssertEqual(link, .link(destination: "https://example.com/device",
+                                    label: .label(title: "Anmeldeseite öffnen", systemName: "arrow.up.right.square")))
+        XCTAssertEqual(try SwiftUIViewExpressionLowerer().lower("Text(\"ABCD\").textSelection(.enabled)"),
+                       .modified(content: .text("ABCD"), modifier: .textSelectionEnabled))
+    }
+
     func testLowererBuildsNativeInputAndSelectionContainers() throws {
         let view = try SwiftUIViewExpressionLowerer().lowerRecordingActions("""
         Form {
