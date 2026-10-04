@@ -2511,9 +2511,9 @@ final class InterpreterKernelTests: XCTestCase {
         let original = ChatConversation(id: id, messages: [message])
         let bytes = try JSONEncoder().encode(original)
         let restored = try JSONDecoder().decode(ChatConversation.self, from: bytes)
-        "\(restored.id == id)|\(restored.messages[0].role == .assistant)|\(restored.messages[0].text)|\(restored.messages[0].modelID == nil)|\(restored.messages[0].createdAt.timeIntervalSince1970)"
+        "\(restored.id == id)|\(restored.messages[0].role == .assistant)|\(restored.messages[0].role != .user)|\(restored.messages[0].text)|\(restored.messages[0].modelID == nil)|\(restored.messages[0].createdAt.timeIntervalSince1970)"
         """#)
-        XCTAssertEqual(result.value, "true|true|hello|true|1000.0")
+        XCTAssertEqual(result.value, "true|true|true|hello|true|1000.0")
     }
 
     func testTargetFoundationUntypedJSONRoundTrip() async throws {

@@ -53,7 +53,21 @@ extension Interpreter {
         }
 
         let lhs = try await evaluate(infix.leftOperand, in: scope)
-        let rhs = try await evaluate(infix.rightOperand, in: scope)
+        // The enum value on the left supplies the type for comparisons
+        // such as `message.role == .assistant` throughout the chat app.
+        // Without that context the bare case on the right cannot resolve.
+        let rhs: Value
+        if (op == "==" || op == "!="),
+           case .enumValue(let enumName, _, _) = lhs,
+           let member = infix.rightOperand.as(MemberAccessExprSyntax.self),
+           member.base == nil,
+           let resolved = enumCaseAccess(
+               typeName: enumName, caseName: member.declName.baseName.text
+           ) {
+            rhs = resolved
+        } else {
+            rhs = try await evaluate(infix.rightOperand, in: scope)
+        }
         return try await applyBinary(
             op: op,
             lhs: lhs, lhsExpr: infix.leftOperand,
