@@ -2594,7 +2594,9 @@ final class InterpreterKernelTests: XCTestCase {
             .appendingPathComponent("Application Support", isDirectory: true)
             .appendingPathComponent("SwiftChat", isDirectory: true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: supportURL.appendingPathComponent("index.json").path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: supportURL.appendingPathComponent("Conversations/conversation-\(id.uppercased()).json").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: supportURL
+            .appendingPathComponent("Conversations", isDirectory: true)
+            .appendingPathComponent("conversation-\(id.uppercased()).json").path))
 
         let reopened = InterpreterKernel(workspace: workspace)
         let loaded = try await reopened.evaluate(declarations + "\n" + #"""

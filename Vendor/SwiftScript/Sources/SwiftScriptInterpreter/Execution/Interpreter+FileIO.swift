@@ -73,18 +73,16 @@ extension Interpreter {
                 args[1], as: FileManager.SearchPathDomainMask.self,
                 typeName: "FileManager.SearchPathDomainMask"
             )
-            if ShellKit.Shell.current.sandbox != nil {
+            if let sandbox = ShellKit.Shell.current.sandbox {
                 guard directory == .applicationSupportDirectory,
                       domain == .userDomainMask else {
                     throw RuntimeError.invalid("FileManager.urls(for:in:): unavailable in the project workspace")
                 }
-                let home = URL(
-                    fileURLWithPath: ShellKit.Shell.displayPath(for: ShellKit.Shell.homeDirectory),
+                let library = URL(
+                    fileURLWithPath: ShellKit.Shell.displayPath(for: sandbox.libraryDirectory),
                     isDirectory: true
                 )
-                let support = home
-                    .appendingPathComponent("Library", isDirectory: true)
-                    .appendingPathComponent("Application Support", isDirectory: true)
+                let support = library.appendingPathComponent("Application Support", isDirectory: true)
                 return .array([boxOpaque(support, typeName: "URL")])
             }
             return .array(FileManager.default.urls(for: directory, in: domain).map {
