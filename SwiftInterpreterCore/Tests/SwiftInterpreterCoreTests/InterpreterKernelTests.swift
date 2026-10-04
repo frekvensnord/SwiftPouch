@@ -110,6 +110,36 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(selected.value, "high")
     }
 
+    func testDynamicComposerImageAndBackgroundRefreshWithState() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var canSend = false")
+        let source = """
+        HStack {
+            Image(systemName: canSend ? "arrow.up" : "mic")
+            ProgressView()
+            Button("Toggle") { canSend = !canSend }
+                .background(canSend ? Color.primary : Color.secondary.opacity(0.35), in: Circle())
+        }
+        """
+        let first = try await kernel.lowerViewExpression(source)
+        guard case .horizontalStack(_, _, let children) = first,
+              case .modified(content: .button(_, let actionID, _),
+                             modifier: .background(let style, _)) = children[2] else {
+            return XCTFail("Expected dynamic composer controls")
+        }
+        XCTAssertEqual(children[0], .image(systemName: "mic"))
+        XCTAssertEqual(children[1], .progressView)
+        XCTAssertEqual(style, .color(RuntimeColorValue(style: .secondary, opacity: 0.35)))
+        _ = try await kernel.performAction(actionID)
+        let refreshed = try await kernel.lowerViewExpression(source)
+        guard case .horizontalStack(_, _, let updated) = refreshed,
+              case .modified(content: .button, modifier: .background(let updatedStyle, _)) = updated[2] else {
+            return XCTFail("Expected updated composer controls")
+        }
+        XCTAssertEqual(updated[0], .image(systemName: "arrow.up"))
+        XCTAssertEqual(updatedStyle, .color(RuntimeColorValue(style: .primary)))
+    }
+
     func testTextFieldAndPickerWriteThroughBindingAndRefreshState() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let source = """

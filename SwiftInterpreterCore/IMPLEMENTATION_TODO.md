@@ -123,6 +123,15 @@ file still depends on the deferred observable-object bridge and the later
 navigation, event, Foundation, and service steps; this control slice does not
 claim that the entire target app can already run.
 
+The Step 30 follow-up also resolves the target's zero-argument named
+`sendDraft`-style callback, pure computed control values, and simple immutable
+`let` aliases within a view builder. Dynamic system-image names and the
+composer button's conditional background style follow current interpreter
+values, while the settings loading indicator renders as `ProgressView()`.
+These are tested through standalone control compositions; evaluating the
+unchanged `ContentView` remains gated by the separately tracked object-state
+bridge and Step 31+ view and service features.
+
 ## Step 31 — Add navigation, presentations, and view events
 
 Implement `NavigationStack`, toolbar components, sheets including item-based

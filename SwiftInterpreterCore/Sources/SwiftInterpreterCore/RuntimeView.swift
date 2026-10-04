@@ -281,6 +281,7 @@ public indirect enum RuntimeViewNode: Codable, Equatable, Sendable {
     case text(String)
     case image(systemName: String)
     case label(title: String, systemName: String)
+    case progressView
     case color(RuntimeColorValue)
     case shape(RuntimeShape)
     case filledShape(shape: RuntimeShape, color: RuntimeColorValue)
@@ -397,6 +398,8 @@ public struct SwiftUIRuntimeRenderer: View {
             Image(systemName: systemName)
         case .label(let title, let systemName):
             Label(title, systemImage: systemName)
+        case .progressView:
+            ProgressView()
         case .color(let value):
             color(value.style).opacity(value.opacity)
         case .shape(let shape):

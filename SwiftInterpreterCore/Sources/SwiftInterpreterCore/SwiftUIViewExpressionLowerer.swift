@@ -251,6 +251,11 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             return try lowerImage(call)
         case "Label":
             return try lowerLabel(call)
+        case "ProgressView":
+            guard call.arguments.isEmpty, hasNoTrailingClosures(call) else {
+                throw RuntimeViewLoweringError.unsupportedArgument("ProgressView")
+            }
+            return .progressView
         case "Color":
             return .color(try runtimeColorValue(expression))
         case "RoundedRectangle", "Rectangle", "Circle", "Capsule":
@@ -561,7 +566,7 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
               argument.label?.text == "systemName" else {
             throw RuntimeViewLoweringError.unsupportedArgument("Image")
         }
-        return .image(systemName: try staticString(argument.expression, viewName: "Image"))
+        return .image(systemName: try stringValue(argument.expression, viewName: "Image"))
     }
 
     private func lowerLabel(_ call: FunctionCallExprSyntax) throws -> RuntimeViewNode {
@@ -1265,6 +1270,19 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     }
 
     private func runtimeBackgroundStyle(_ expression: ExprSyntax) throws -> RuntimeBackgroundStyle {
+        if let conditional = expression.as(TernaryExprSyntax.self) {
+            // Validate both display styles before selecting the current
+            // snapshot, including the currently inactive branch.
+            let onTrue = try runtimeBackgroundStyle(conditional.thenExpression)
+            let onFalse = try runtimeBackgroundStyle(conditional.elseExpression)
+            let offset = conditional.condition.positionAfterSkippingLeadingTrivia.utf8Offset
+            guard let selected = staticBoolean(conditional.condition)
+                    ?? resolvedDynamicBooleanSites[offset]
+                    ?? resolvedDynamicBooleans[conditional.condition.trimmedDescription] else {
+                throw RuntimeViewLoweringError.unsupportedArgument("background condition")
+            }
+            return selected ? onTrue : onFalse
+        }
         if let name = staticMemberName(expression) {
             let materialName: String
             switch name {
@@ -1421,9 +1439,9 @@ private final class DynamicTextExpressionVisitor: SyntaxVisitor {
         }
         let called = node.calledExpression.trimmedDescription
         let modifier = node.calledExpression.as(MemberAccessExprSyntax.self)?.declName.baseName.text
-        guard ["Text", "Button", "TextField", "Picker", "Section", "Label"].contains(called) || modifier == "tag",
+        guard ["Text", "Button", "TextField", "Picker", "Section", "Label", "Image"].contains(called) || modifier == "tag",
               let argument = node.arguments.first,
-              argument.label == nil,
+              (argument.label == nil || called == "Image" && argument.label?.text == "systemName"),
               (called != "Button" || node.trailingClosure != nil || node.arguments.contains(where: { $0.label?.text == "action" })),
               !isPlainStringLiteral(argument.expression) else {
             return .visitChildren
@@ -1503,20 +1521,36 @@ private final class DynamicBooleanModifierExpressionVisitor: SyntaxVisitor {
             return .skipChildren
         }
         guard let memberAccess = node.calledExpression.as(MemberAccessExprSyntax.self),
-              memberAccess.declName.baseName.text == "disabled",
-              node.arguments.count == 1,
               let argument = node.arguments.first,
               argument.label == nil,
               node.trailingClosure == nil,
-              node.additionalTrailingClosures.isEmpty,
-              argument.expression.as(BooleanLiteralExprSyntax.self) == nil else {
+              node.additionalTrailingClosures.isEmpty else {
+            return .visitChildren
+        }
+
+        let condition: ExprSyntax
+        switch memberAccess.declName.baseName.text {
+        case "disabled":
+            guard node.arguments.count == 1,
+                  argument.expression.as(BooleanLiteralExprSyntax.self) == nil else {
+                return .visitChildren
+            }
+            condition = argument.expression
+        case "background":
+            guard (1...2).contains(node.arguments.count),
+                  let ternary = argument.expression.as(TernaryExprSyntax.self),
+                  ternary.condition.as(BooleanLiteralExprSyntax.self) == nil else {
+                return .visitChildren
+            }
+            condition = ternary.condition
+        default:
             return .visitChildren
         }
 
         sites.append(
             DynamicViewExpressionSite(
-                expression: argument.expression.trimmedDescription,
-                utf8Offset: argument.expression.positionAfterSkippingLeadingTrivia.utf8Offset
+                expression: condition.trimmedDescription,
+                utf8Offset: condition.positionAfterSkippingLeadingTrivia.utf8Offset
             )
         )
         return .visitChildren
