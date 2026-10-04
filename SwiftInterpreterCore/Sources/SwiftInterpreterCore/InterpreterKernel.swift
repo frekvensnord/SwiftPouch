@@ -136,6 +136,7 @@ public actor InterpreterKernel {
         stateDeclarations: [ViewStateDeclaration] = [],
         stateTypeName: String? = nil
     ) async throws -> RuntimeViewNode {
+        let source = try customViewSourceExpander.expandBuilderLets(in: source)
         let containsForEach = try viewForEachSourceEditor.firstForEach(in: source) != nil
         let allTextSites = try viewExpressionLowerer.dynamicStringExpressionSites(in: source)
         let allTextExpressions = Array(Set(allTextSites.map(\.expression))).sorted()

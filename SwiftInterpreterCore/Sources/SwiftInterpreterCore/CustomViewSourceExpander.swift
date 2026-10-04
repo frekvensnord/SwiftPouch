@@ -26,8 +26,19 @@ struct CustomViewSourceExpander: Sendable {
             declarations[declaration.name.text, default: []].append(declaration)
         }
 
+        let rootDeclarations = declarations[rootTypeName] ?? []
+        guard rootDeclarations.count == 1, let rootDeclaration = rootDeclarations.first else {
+            throw RuntimeViewLoweringError.unsupportedExpression(
+                "custom view root \(rootTypeName) must have one top-level declaration"
+            )
+        }
+        let rootBody = try bodySourceEditor.extract(in: source, typeName: rootTypeName)
+        let rootHelpers = try helperValues(in: rootDeclaration, extractedBody: rootBody)
+        let withoutBuilderLets = try expandBuilderLets(in: expression)
+        let withRootHelpers = try substituting(rootHelpers, into: withoutBuilderLets)
+
         return try expand(
-            expression,
+            withRootHelpers,
             source: source,
             declarations: declarations,
             expansionStack: [rootTypeName],
@@ -114,7 +125,10 @@ struct CustomViewSourceExpander: Sendable {
                 source: source
             )
             let arguments = try argumentValues(for: customCall.syntax, definition: definition)
-            let instantiatedBody = try substituting(arguments, into: definition.body)
+            let instantiatedBody = try substituting(
+                arguments,
+                into: substituting(definition.helpers, into: definition.body)
+            )
             let expandedBody = try expand(
                 instantiatedBody,
                 source: source,
@@ -169,6 +183,13 @@ struct CustomViewSourceExpander: Sendable {
                     guard variable.bindings.count == 1 else {
                         throw unsupportedCustomView(name, "body must be declared on its own")
                     }
+                    continue
+                }
+                if variable.bindings.count == 1,
+                   variable.bindings.first?.accessorBlock != nil {
+                    // Scalar computed properties are expanded before stored
+                    // initializer inputs. @ViewBuilder helpers belong to the
+                    // later view-composition and event stages.
                     continue
                 }
 
@@ -230,6 +251,10 @@ struct CustomViewSourceExpander: Sendable {
                     name: identifier.identifier.text,
                     kind: type.as(FunctionTypeSyntax.self) == nil ? .value : .function
                 ))
+            } else if member.decl.as(FunctionDeclSyntax.self) != nil {
+                // A synchronous, zero-argument helper can be passed as a
+                // callback. It is not a synthesized initializer input.
+                continue
             } else {
                 throw unsupportedCustomView(
                     name,
@@ -238,7 +263,160 @@ struct CustomViewSourceExpander: Sendable {
             }
         }
 
-        return CustomViewDefinition(inputs: inputs, body: extractedBody.expression)
+        return CustomViewDefinition(
+            inputs: inputs,
+            body: try expandBuilderLets(in: extractedBody.expression),
+            helpers: try helperValues(in: declaration, extractedBody: extractedBody)
+        )
+    }
+
+    /// In a view-builder closure, a simple immutable local aliases a pure
+    /// snapshot expression for the following siblings. Expand it before
+    /// condition and ForEach lowering so both paths see the same lexical name.
+    func expandBuilderLets(in source: String) throws -> String {
+        var rewritten = source
+        for _ in 0..<256 {
+            let syntax = Parser.parse(source: rewritten)
+            guard !syntax.hasError else { throw RuntimeViewLoweringError.malformedSyntax }
+            let visitor = ViewBuilderLetVisitor()
+            visitor.walk(syntax)
+            guard let site = visitor.sites.first else { return rewritten }
+            let variable = site.declaration
+            guard variable.bindingSpecifier.text == "let",
+                  variable.attributes.isEmpty,
+                  variable.bindings.count == 1,
+                  let binding = variable.bindings.first,
+                  let identifier = binding.pattern.as(IdentifierPatternSyntax.self),
+                  let initializer = binding.initializer?.value,
+                  binding.accessorBlock == nil,
+                  initializer.as(DeclReferenceExprSyntax.self) != nil
+                    || initializer.as(MemberAccessExprSyntax.self) != nil
+                    || initializer.as(ArrayExprSyntax.self) != nil else {
+                throw RuntimeViewLoweringError.unsupportedExpression(
+                    "view-builder let must alias a simple value without side effects"
+                )
+            }
+            let name = identifier.identifier.text
+            var replacements = [SourceReplacement(
+                start: site.item.positionAfterSkippingLeadingTrivia.utf8Offset,
+                end: site.item.endPositionBeforeTrailingTrivia.utf8Offset,
+                text: ""
+            )]
+            for item in site.following {
+                let bindings = IdentifierPatternNameVisitor()
+                bindings.walk(item)
+                guard !bindings.names.contains(name) else {
+                    throw RuntimeViewLoweringError.unsupportedExpression(
+                        "view-builder let \(name) is shadowed in its scope"
+                    )
+                }
+                let references = StoredPropertyReferenceVisitor()
+                references.walk(item)
+                for reference in references.references where reference.name == name {
+                    guard !reference.isProjection, !reference.isFunctionName else {
+                        throw RuntimeViewLoweringError.unsupportedExpression(
+                            "view-builder let \(name) must be read as a value"
+                        )
+                    }
+                    replacements.append(SourceReplacement(
+                        start: reference.start,
+                        end: reference.end,
+                        text: "(\(initializer.trimmedDescription))"
+                    ))
+                }
+            }
+            var bytes = Array(rewritten.utf8)
+            for replacement in replacements.sorted(by: { $0.start > $1.start }) {
+                guard replacement.end <= bytes.count else { throw RuntimeViewLoweringError.malformedSyntax }
+                bytes.replaceSubrange(replacement.start..<replacement.end, with: replacement.text.utf8)
+            }
+            rewritten = String(decoding: bytes, as: UTF8.self)
+        }
+        throw RuntimeViewLoweringError.unsupportedExpression("too many view-builder local values")
+    }
+
+    private func helperValues(
+        in declaration: StructDeclSyntax,
+        extractedBody: ExtractedViewBody
+    ) throws -> [String: CustomViewArgumentValue] {
+        var raw: [String: CustomViewArgumentValue] = [:]
+        for member in declaration.memberBlock.members {
+            if let variable = member.decl.as(VariableDeclSyntax.self),
+               variable.bindings.count == 1,
+               let binding = variable.bindings.first,
+               let identifier = binding.pattern.as(IdentifierPatternSyntax.self),
+               identifier.identifier.text != "body",
+               binding.accessorBlock != nil,
+               !variable.attributes.contains(where: { element in
+                   guard case .attribute(let attribute) = element else { return false }
+                   return attribute.attributeName.trimmedDescription == "ViewBuilder"
+               }) {
+                let statements = try bodySourceEditor.getterStatements(
+                    for: binding,
+                    typeName: declaration.name.text
+                )
+                let expression: String
+                if statements.count == 1,
+                   let item = statements.first?.item.as(ExprSyntax.self) {
+                    expression = "(\(item.trimmedDescription))"
+                } else if statements.count == 1,
+                          let returned = statements.first?.item.as(ReturnStmtSyntax.self)?.expression {
+                    expression = "(\(returned.trimmedDescription))"
+                } else {
+                    expression = "({\n\(statements.description)\n})()"
+                }
+                raw[identifier.identifier.text] = CustomViewArgumentValue(
+                    expression: try bodySourceEditor.rewriteMemberReferences(
+                        in: expression, from: extractedBody
+                    ),
+                    supportsProjection: false
+                )
+            } else if let function = member.decl.as(FunctionDeclSyntax.self),
+                      function.signature.parameterClause.parameters.isEmpty,
+                      function.signature.effectSpecifiers == nil,
+                      function.genericParameterClause == nil,
+                      let body = function.body {
+                raw[function.name.text] = CustomViewArgumentValue(
+                    expression: try bodySourceEditor.rewriteMemberReferences(
+                        in: "{\n\(body.statements.description)\n}", from: extractedBody
+                    ),
+                    supportsProjection: false,
+                    isCallable: true
+                )
+            }
+        }
+
+        var resolved: [String: CustomViewArgumentValue] = [:]
+        func resolve(_ name: String, stack: [String]) throws -> CustomViewArgumentValue {
+            if let value = resolved[name] { return value }
+            guard let value = raw[name] else {
+                throw RuntimeViewLoweringError.unsupportedExpression("unknown view helper \(name)")
+            }
+            guard !stack.contains(name) else {
+                throw RuntimeViewLoweringError.unsupportedExpression(
+                    "recursive view helper: \((stack + [name]).joined(separator: " -> "))"
+                )
+            }
+            let syntax = Parser.parse(source: value.expression)
+            guard !syntax.hasError else { throw RuntimeViewLoweringError.malformedSyntax }
+            let visitor = StoredPropertyReferenceVisitor()
+            visitor.walk(syntax)
+            let dependencies = Set(visitor.references.map(\.name)).intersection(raw.keys)
+            var replacements: [String: CustomViewArgumentValue] = [:]
+            for dependency in dependencies {
+                replacements[dependency] = try resolve(dependency, stack: stack + [name])
+            }
+            let expanded = try substituting(replacements, into: value.expression)
+            let result = CustomViewArgumentValue(
+                expression: expanded,
+                supportsProjection: false,
+                isCallable: value.isCallable
+            )
+            resolved[name] = result
+            return result
+        }
+        for name in raw.keys.sorted() { _ = try resolve(name, stack: []) }
+        return resolved
     }
 
     private func argumentValues(
@@ -383,6 +561,7 @@ struct CustomViewSourceExpander: Sendable {
 private struct CustomViewDefinition {
     let inputs: [CustomViewInput]
     let body: String
+    let helpers: [String: CustomViewArgumentValue]
 }
 
 private struct CustomViewInput {
@@ -419,6 +598,44 @@ private struct SourceReplacement {
     let start: Int
     let end: Int
     let text: String
+}
+
+private struct ViewBuilderLetSite {
+    let item: CodeBlockItemSyntax
+    let declaration: VariableDeclSyntax
+    let following: [CodeBlockItemSyntax]
+}
+
+private final class ViewBuilderLetVisitor: SyntaxVisitor {
+    private(set) var sites: [ViewBuilderLetSite] = []
+
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        if isInsideButtonActionClosure(node) { return .skipChildren }
+        let builderNames: Set<String> = [
+            "Section", "Form", "Menu", "Picker", "VStack", "HStack",
+            "LazyVStack", "Group", "ScrollView", "ScrollViewReader", "ForEach"
+        ]
+        guard builderNames.contains(node.calledExpression.trimmedDescription) else {
+            return .visitChildren
+        }
+        let closures = [node.trailingClosure].compactMap { $0 }
+            + node.additionalTrailingClosures.map(\.closure)
+        for closure in closures {
+            let items = Array(closure.statements)
+            for (index, item) in items.enumerated() {
+                if let declaration = item.item.as(DeclSyntax.self)?.as(VariableDeclSyntax.self) {
+                    sites.append(ViewBuilderLetSite(
+                        item: item,
+                        declaration: declaration,
+                        following: Array(items.dropFirst(index + 1))
+                    ))
+                }
+            }
+        }
+        return .visitChildren
+    }
 }
 
 private final class CustomViewCallVisitor: SyntaxVisitor {

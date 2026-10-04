@@ -3,6 +3,113 @@ import XCTest
 @testable import SwiftInterpreterCore
 
 final class InterpreterKernelTests: XCTestCase {
+    func testNamedRootViewMethodIsPassedToComposerButton() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var sent = \"\"")
+        let source = """
+        struct RootView: View {
+            @State private var draft = "Bereit"
+            var body: some View {
+                Composer(text: $draft, onSend: sendDraft)
+            }
+            private func sendDraft() {
+                sent = draft
+                draft = ""
+            }
+        }
+        struct Composer: View {
+            @Binding var text: String
+            let onSend: () -> Void
+            var body: some View {
+                VStack {
+                    TextField("Nachricht", text: $text)
+                    Button(action: onSend) { Text("Senden") }
+                }
+            }
+        }
+        """
+        let first = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .verticalStack(_, _, let children) = first,
+              case .button(_, let sendID, _) = children[1] else {
+            return XCTFail("Expected named composer callback")
+        }
+        _ = try await kernel.performAction(sendID)
+        let sent = try await kernel.evaluate("sent")
+        XCTAssertEqual(sent.value, "Bereit")
+        let updated = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .verticalStack(_, _, let refreshed) = updated,
+              case .textField(_, let value, _, _) = refreshed[0] else {
+            return XCTFail("Expected composer to refresh")
+        }
+        XCTAssertEqual(value, "")
+    }
+
+    func testComputedSelectorValuesFeedDynamicMenuButtons() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var selected = \"auto\"")
+        let source = """
+        struct RootView: View {
+            var body: some View {
+                ModelMenu(levels: ["low", "high"])
+            }
+        }
+        struct ModelMenu: View {
+            let levels: [String]
+            private var reasoningLevels: [String] {
+                let reported = levels
+                return reported.isEmpty ? ["medium"] : reported
+            }
+            var body: some View {
+                Menu {
+                    ForEach(reasoningLevels, id: \\.self) { level in
+                        Button(level.capitalized) { selected = level }
+                    }
+                } label: { Text(selected) }
+            }
+        }
+        """
+        let first = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .menu(_, .forEach(let items)) = first,
+              items.count == 2,
+              case .button(let label, let actionID, _) = items[1].content else {
+            return XCTFail("Expected computed levels in the menu")
+        }
+        XCTAssertEqual(label, .text("High"))
+        _ = try await kernel.performAction(actionID)
+        let selected = try await kernel.evaluate("selected")
+        XCTAssertEqual(selected.value, "high")
+    }
+
+    func testLocalBuilderValueFeedsReasoningPickerAndBinding() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("let reportedLevels = [\"low\", \"high\"]; var selected = \"low\"")
+        let source = """
+        Form {
+            Section("Reasoning") {
+                let levels = reportedLevels
+                if levels.isEmpty {
+                    Text("Keine Stufen")
+                } else {
+                    Picker("Stufe", selection: Binding(get: { selected }, set: { selected = $0 })) {
+                        ForEach(levels, id: \\.self) { level in
+                            Text(level.capitalized).tag(level)
+                        }
+                    }
+                }
+            }
+        }
+        """
+        let first = try await kernel.lowerViewExpression(source)
+        guard case .form(.section(_, .picker(_, let selection, let id, .forEach(let rows)))) = first else {
+            return XCTFail("Expected locally aliased picker options")
+        }
+        XCTAssertEqual(selection, "low")
+        XCTAssertEqual(rows.count, 2)
+        try await kernel.setInput(id, to: "high")
+        let selected = try await kernel.evaluate("selected")
+        XCTAssertEqual(selected.value, "high")
+    }
+
     func testTextFieldAndPickerWriteThroughBindingAndRefreshState() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let source = """

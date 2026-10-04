@@ -27,6 +27,20 @@ struct ExtractedViewBody: Sendable {
 
 /// Extracts the computed body property from one top-level struct declaration.
 struct ViewBodySourceEditor: Sendable {
+    func rewriteMemberReferences(
+        in expression: String,
+        from body: ExtractedViewBody
+    ) throws -> String {
+        let withState = try rewriteStateReferences(
+            in: expression,
+            declarations: body.stateDeclarations
+        )
+        return try rewriteEnvironmentReferences(
+            in: withState,
+            declarations: body.environmentDeclarations
+        )
+    }
+
     func extract(in source: String, typeName: String) throws -> ExtractedViewBody {
         let syntaxTree = Parser.parse(source: source)
         guard !syntaxTree.hasError else {
@@ -395,7 +409,7 @@ struct ViewBodySourceEditor: Sendable {
         return "__swiftpouch_state_\(hex(ownerTypeName))_\(hex(propertyName))"
     }
 
-    private func getterStatements(
+    func getterStatements(
         for binding: PatternBindingSyntax,
         typeName: String
     ) throws -> CodeBlockItemListSyntax {
