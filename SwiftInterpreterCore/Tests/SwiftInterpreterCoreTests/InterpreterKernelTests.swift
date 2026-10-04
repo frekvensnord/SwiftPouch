@@ -140,6 +140,68 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(updatedStyle, .color(RuntimeColorValue(style: .primary)))
     }
 
+    func testSettingsReasoningChoicesUseComputedGuardAndLocalAlias() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        struct Model {
+            var id: String
+            var supportedReasoningLevels: [String]
+        }
+        let models = [
+            Model(id: "a", supportedReasoningLevels: ["low"]),
+            Model(id: "b", supportedReasoningLevels: ["medium", "high"])
+        ]
+        let selectedID: String? = "b"
+        """)
+        let source = """
+        struct RootView: View {
+            @State private var reasoning = "medium"
+            var body: some View {
+                ReasoningForm(models: models, selectedID: selectedID, reasoning: $reasoning)
+            }
+        }
+        struct ReasoningForm: View {
+            let models: [Model]
+            let selectedID: String?
+            @Binding var reasoning: String
+            private var selectedReasoningLevels: [String] {
+                guard let id = selectedID,
+                      let model = models.first(where: { $0.id == id }) else { return [] }
+                return model.supportedReasoningLevels
+            }
+            var body: some View {
+                Form {
+                    Section("Reasoning") {
+                        let levels = selectedReasoningLevels
+                        if levels.isEmpty {
+                            Text("Keine Stufen")
+                        } else {
+                            Picker("Stufe", selection: $reasoning) {
+                                ForEach(levels, id: \\.self) { level in
+                                    Text(level.capitalized).tag(level)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        """
+        let initial = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .form(.section(_, .picker(_, let selection, let inputID, .forEach(let rows)))) = initial else {
+            return XCTFail("Expected settings reasoning form")
+        }
+        XCTAssertEqual(selection, "medium")
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[1].content, .modified(content: .text("High"), modifier: .tag("high")))
+        try await kernel.setInput(inputID, to: "high")
+        let updated = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .form(.section(_, .picker(_, let selected, _, _))) = updated else {
+            return XCTFail("Expected refreshed settings picker")
+        }
+        XCTAssertEqual(selected, "high")
+    }
+
     func testTextFieldAndPickerWriteThroughBindingAndRefreshState() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         let source = """

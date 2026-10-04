@@ -1273,8 +1273,16 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         if let conditional = expression.as(TernaryExprSyntax.self) {
             // Validate both display styles before selecting the current
             // snapshot, including the currently inactive branch.
-            let onTrue = try runtimeBackgroundStyle(conditional.thenExpression)
-            let onFalse = try runtimeBackgroundStyle(conditional.elseExpression)
+            let onTrue: RuntimeBackgroundStyle
+            let onFalse: RuntimeBackgroundStyle
+            do {
+                onTrue = try runtimeBackgroundStyle(conditional.thenExpression)
+                onFalse = try runtimeBackgroundStyle(conditional.elseExpression)
+            } catch {
+                throw RuntimeViewLoweringError.unsupportedArgument(
+                    "background styles \(conditional.thenExpression.trimmedDescription) / \(conditional.elseExpression.trimmedDescription)"
+                )
+            }
             let offset = conditional.condition.positionAfterSkippingLeadingTrivia.utf8Offset
             guard let selected = staticBoolean(conditional.condition)
                     ?? resolvedDynamicBooleanSites[offset]
@@ -1282,6 +1290,11 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
                 throw RuntimeViewLoweringError.unsupportedArgument("background condition")
             }
             return selected ? onTrue : onFalse
+        }
+        if expression.trimmedDescription.contains("?") {
+            throw RuntimeViewLoweringError.unsupportedArgument(
+                "background expression \(expression.trimmedDescription)"
+            )
         }
         if let name = staticMemberName(expression) {
             let materialName: String
