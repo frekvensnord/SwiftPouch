@@ -86,6 +86,7 @@ public actor InterpreterKernel {
     private var initializedViewStateOwners: [String: String] = [:]
     private var registeredRuntimeActions: [RuntimeActionID: RuntimeActionRegistration] = [:]
     private var registeredRuntimeInputs: [RuntimeInputID: RuntimeInputSource] = [:]
+    private var previousRuntimeInputs: [RuntimeInputID: RuntimeInputSource] = [:]
     private let forEachTemporaryPrefix = "__swiftpouch_runtime_foreach_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
     private var currentScenePhase: RuntimeScenePhase = .active
     private var interpreterScenePhase: RuntimeScenePhase?
@@ -144,16 +145,18 @@ public actor InterpreterKernel {
         let dynamicDisabledExpressions = try viewExpressionLowerer.dynamicBooleanModifierArguments(in: source)
         let allScrollIDSites = try viewExpressionLowerer.scrollIDExpressionSites(in: source)
         let inputSites = try viewExpressionLowerer.inputSites(in: source)
+        let presentationSites = try viewExpressionLowerer.presentationSites(in: source)
         guard !allTextSites.isEmpty
                 || !dynamicConditions.isEmpty
                 || !dynamicDisabledExpressions.isEmpty
                 || !allScrollIDSites.isEmpty
-                || containsForEach || !inputSites.isEmpty else {
+                || containsForEach || !inputSites.isEmpty || !presentationSites.isEmpty else {
             let loweredView = try viewExpressionLowerer.lowerRecordingActions(source)
             if let stateTypeName {
                 try await seedViewStateDeclarations(stateDeclarations, typeName: stateTypeName)
             }
             registeredRuntimeActions = loweredView.actions
+            previousRuntimeInputs = registeredRuntimeInputs
             registeredRuntimeInputs = loweredView.inputs
             return loweredView.node
         }
@@ -224,6 +227,64 @@ public actor InterpreterKernel {
             expansionCount += 1
         }
 
+        // An absent item has no closure parameter in scope. Keep the sheet
+        // itself, but do not evaluate its unmounted content until it is shown.
+        let initialPresentationSites = try viewExpressionLowerer.presentationSites(in: selectedSource)
+        for site in initialPresentationSites.reversed() where site.kind == .item {
+            let value = try await presentationValue(site, in: bindingScopes)
+            if case .optional(nil) = value, let range = site.bodyRange {
+                let bytes = Array(selectedSource.utf8)
+                var rewritten = bytes
+                rewritten.replaceSubrange(range, with: Array(" EmptyView() ".utf8))
+                selectedSource = String(decoding: rewritten, as: UTF8.self)
+                bindingScopes = try adjustedBindingScopes(
+                    bindingScopes, replacing: range, replacementLength: " EmptyView() ".utf8.count
+                )
+            }
+        }
+        let selectedPresentationSites = try viewExpressionLowerer.presentationSites(in: selectedSource)
+        var presentationBooleans: [Int: Bool] = [:]
+        var presentationItems: [Int: RuntimePresentedItem] = [:]
+        var changeValues: [Int: String] = [:]
+        for site in selectedPresentationSites {
+            let value = try await presentationValue(site, in: bindingScopes)
+            switch site.kind {
+            case .boolean:
+                guard case .bool(let shown) = value else {
+                    throw RuntimeViewLoweringError.unsupportedArgument("presentation requires a Bool binding")
+                }
+                presentationBooleans[site.offset] = shown
+            case .item:
+                guard case .optional(let wrapped) = value else {
+                    throw RuntimeViewLoweringError.unsupportedArgument("item sheet requires an optional binding")
+                }
+                if let wrapped {
+                    let idValue = try await evaluateViewExpression(
+                        "\(site.parameter ?? "item").id", fallback: "nil",
+                        activeBindings: [],
+                        forEachBindings: [RuntimeForEachItemBinding(name: site.parameter ?? "item", value: wrapped)]
+                    )
+                    presentationItems[site.offset] = RuntimePresentedItem(id: try stableForEachIdentifier(idValue))
+                    if let name = site.parameter, let range = site.bodyRange {
+                        bindingScopes.append(ActiveBindingScope(
+                            lowerBound: range.lowerBound, upperBound: range.upperBound,
+                            bindings: [], forEachBindings: [RuntimeForEachItemBinding(name: name, value: wrapped)],
+                            capturedActionBindings: []
+                        ))
+                    }
+                }
+            case .change:
+                changeValues[site.offset] = String(describing: value)
+                if let name = site.parameter {
+                    bindingScopes.append(ActiveBindingScope(
+                        lowerBound: site.actionOffset, upperBound: site.actionOffset + 1,
+                        bindings: [], forEachBindings: [],
+                        capturedActionBindings: [RuntimeForEachItemBinding(name: name, value: value)]
+                    ))
+                }
+            }
+        }
+
         let selectedTextSites = try viewExpressionLowerer.dynamicStringExpressionSites(in: selectedSource)
         let selectedDisabledSites = try viewExpressionLowerer.dynamicBooleanModifierArgumentSites(in: selectedSource)
         let selectedScrollIDSites = try viewExpressionLowerer.scrollIDExpressionSites(in: selectedSource)
@@ -267,9 +328,13 @@ public actor InterpreterKernel {
             resolvedDynamicBooleanSites: resolvedDisabledSites,
             resolvedScrollIDSites: resolvedScrollIDSites,
             forEachBindingsByActionOffset: actionBindings,
-            resolvedInputValues: resolvedInputValues
+            resolvedInputValues: resolvedInputValues,
+            resolvedPresentationBooleans: presentationBooleans,
+            resolvedPresentationItems: presentationItems,
+            resolvedChangeValues: changeValues
         ).lowerRecordingActions(selectedSource)
         registeredRuntimeActions = loweredView.actions
+        previousRuntimeInputs = registeredRuntimeInputs
         registeredRuntimeInputs = loweredView.inputs
         return loweredView.node
     }
@@ -392,6 +457,7 @@ public actor InterpreterKernel {
         let previousStateOwners = initializedViewStateOwners
         let previousActions = registeredRuntimeActions
         let previousInputs = registeredRuntimeInputs
+        let olderInputs = previousRuntimeInputs
         let previousScenePhase = currentScenePhase
         let previousInterpreterScenePhase = interpreterScenePhase
         let previousDismissBridgeInstalled = interpreterDismissBridgeInstalled
@@ -409,6 +475,7 @@ public actor InterpreterKernel {
             initializedViewStateOwners = previousStateOwners
             registeredRuntimeActions = previousActions
             registeredRuntimeInputs = previousInputs
+            previousRuntimeInputs = olderInputs
             currentScenePhase = previousScenePhase
             interpreterScenePhase = previousInterpreterScenePhase
             interpreterDismissBridgeInstalled = previousDismissBridgeInstalled
@@ -507,6 +574,8 @@ public actor InterpreterKernel {
                   interpreter.rootScope.assign(name, value: .string(value)) else {
                 throw RuntimeViewLoweringError.unsupportedArgument("input must bind to a mutable String state")
             }
+        case .projected:
+            throw RuntimeViewLoweringError.unsupportedArgument("text input cannot use a projected member binding")
         case .computed(_, let setter):
             let name = "__swiftpouch_input_payload"
             interpreter.rootScope.bind(name, value: .string(value), mutable: false)
@@ -514,6 +583,52 @@ public actor InterpreterKernel {
             let body = setter.replacingOccurrences(of: "$0", with: "__swiftpouch_input_value")
             _ = try await evaluateLocked("({ __swiftpouch_input_value in \(body) })(\(name))", resetInterpreter: false)
         }
+    }
+
+    /// Writes a native sheet or alert dismissal to the interpreted binding.
+    public func setPresentation(_ inputID: RuntimeInputID, isPresented: Bool) async throws {
+        await acquireEvaluationSlot()
+        defer { releaseEvaluationSlot() }
+        guard let source = registeredRuntimeInputs[inputID] ?? previousRuntimeInputs[inputID] else {
+            throw RuntimeViewLoweringError.unsupportedArgument("unknown presentation binding")
+        }
+        switch source {
+        case .state(let name):
+            guard let value = interpreter.rootScope.lookup(name)?.value else {
+                throw RuntimeViewLoweringError.unsupportedArgument("unknown presentation state")
+            }
+            let replacement: Value
+            switch value {
+            case .bool: replacement = .bool(isPresented)
+            case .optional: replacement = .optional(nil)
+            default: throw RuntimeViewLoweringError.unsupportedArgument("presentation requires Bool or Optional state")
+            }
+            guard interpreter.rootScope.assign(name, value: replacement) else {
+                throw RuntimeViewLoweringError.unsupportedArgument("presentation state is immutable")
+            }
+        case .projected(let path):
+            guard !isPresented else {
+                throw RuntimeViewLoweringError.unsupportedArgument("an item sheet cannot synthesize a new item")
+            }
+            _ = try await evaluateLocked("\(path) = nil", resetInterpreter: false)
+        case .computed:
+            throw RuntimeViewLoweringError.unsupportedArgument("computed presentation bindings are not supported")
+        }
+    }
+
+    private func presentationValue(
+        _ site: RuntimePresentationSite,
+        in bindingScopes: [ActiveBindingScope]
+    ) async throws -> Value {
+        let expression = site.kind == .change ? site.expression : String(site.expression.dropFirst())
+        guard site.kind == .change || site.expression.hasPrefix("$") else {
+            throw RuntimeViewLoweringError.unsupportedArgument("presentation requires a binding projection")
+        }
+        return try await evaluateViewExpression(
+            expression, fallback: site.kind == .boolean ? "false" : "nil",
+            activeBindings: activeBindings(at: site.offset, in: bindingScopes),
+            forEachBindings: activeForEachBindings(at: site.offset, in: bindingScopes)
+        )
     }
 
     private func consumeScrollRequest() throws -> RuntimeScrollRequest? {
@@ -599,6 +714,7 @@ public actor InterpreterKernel {
         initializedViewStateOwners.removeAll()
         registeredRuntimeActions.removeAll()
         registeredRuntimeInputs.removeAll()
+        previousRuntimeInputs.removeAll()
         interpreterScenePhase = nil
         interpreterDismissBridgeInstalled = false
     }
@@ -1176,6 +1292,8 @@ public actor InterpreterKernel {
                     switch site.source {
                     case .state(let name):
                         value = try await self.inputStateValue(name)
+                    case .projected:
+                        throw RuntimeViewLoweringError.unsupportedArgument("text input cannot use a projected member binding")
                     case .computed(let getter, _):
                         value = try await self.evaluateViewExpression(
                             getter,

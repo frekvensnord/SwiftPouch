@@ -3,6 +3,197 @@ import XCTest
 @testable import SwiftInterpreterCore
 
 final class InterpreterKernelTests: XCTestCase {
+    func testToolbarOpensHistoryAndSettingsAndDismissalWritesBack() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let source = """
+        struct RootView: View {
+            @State private var history = false
+            @State private var settings = false
+            @State private var notice = false
+            @Environment(\\.dismiss) private var dismiss
+            var body: some View {
+                NavigationStack {
+                    Text("Chat")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarLeading) {
+                                Button("Verlauf") { history = true }
+                            }
+                            ToolbarItemGroup(placement: .topBarTrailing) {
+                                Button("Einstellungen") { settings = true }
+                                Button("Hinweis") { notice = true }
+                            }
+                        }
+                }
+                .sheet(isPresented: $history) {
+                    NavigationStack {
+                        Text("Chatverlauf").navigationTitle("Chatverlauf")
+                            .toolbar {
+                                ToolbarItem(placement: .topBarLeading) {
+                                    Button("Fertig") { dismiss() }
+                                }
+                            }
+                    }
+                }
+                .sheet(isPresented: $settings) {
+                    NavigationStack { Form { Text("Einstellungen") } }
+                }
+                .alert("Hinweis", isPresented: $notice) {
+                    Button("OK", role: .cancel) {}
+                } message: { Text("Eine Nachricht") }
+            }
+        }
+        """
+        let first = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .modified(content: .modified(content: .modified(content: .navigationStack(
+                            .modified(content: .modified(content: .text("Chat"), modifier: .navigationBarTitleDisplayModeInline),
+                                      modifier: .toolbar(let toolbar))),
+                            modifier: .sheet(_, let historyID, _)),
+                            modifier: .sheet(_, _, _)),
+                            modifier: .alert(_, _, _, _, _)) = first,
+              case .button(_, let openHistory, _) = toolbar[0].content,
+              case .group(let trailing) = toolbar[1].content,
+              case .button(_, let openSettings, _) = trailing[0],
+              case .button(_, let openNotice, _) = trailing[1] else {
+            return XCTFail("Expected functional navigation toolbar and presentations")
+        }
+        _ = try await kernel.performAction(openHistory)
+        let shown = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .modified(content: .modified(content: .modified(_, modifier: .sheet(true, let activeHistoryID, let historyContent)), modifier: .sheet), modifier: .alert) = shown,
+              case .navigationStack(.modified(_, modifier: .toolbar(let finishItems))) = historyContent,
+              case .button(_, let finish, _) = finishItems[0].content else {
+            return XCTFail("History sheet should be shown with its dismiss button")
+        }
+        XCTAssertNotEqual(historyID, activeHistoryID)
+        let result = try await kernel.performAction(finish)
+        XCTAssertTrue(result.requestsHostDismissal)
+        _ = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        try await kernel.setPresentation(activeHistoryID, isPresented: false)
+        let historyState = try await kernel.evaluate("history")
+        XCTAssertEqual(historyState.value, "false")
+        let newNavigation = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .modified(content: .modified(content: .modified(_, modifier: .sheet(false, _, _)), modifier: .sheet), modifier: .alert) = newNavigation else {
+            return XCTFail("Dismissed history must stay closed")
+        }
+        guard case .modified(content: .modified(content: .modified(content: .navigationStack(
+                            .modified(_, modifier: .toolbar(let updatedToolbar))), modifier: .sheet),
+                            modifier: .sheet(_, let settingsID, _)), modifier: .alert(_, _, let noticeID, _, _)) = newNavigation,
+              case .group(let updatedTrailing) = updatedToolbar[1].content,
+              case .button(_, let settingsButton, _) = updatedTrailing[0],
+              case .button(_, let noticeButton, _) = updatedTrailing[1] else {
+            return XCTFail("Toolbar actions should refresh with the view")
+        }
+        _ = try await kernel.performAction(settingsButton)
+        let settingsShown = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .modified(content: .modified(_, modifier: .sheet(true, let activeSettingsID, _)), modifier: .alert) = settingsShown else {
+            return XCTFail("Settings sheet should open")
+        }
+        XCTAssertNotEqual(settingsID, activeSettingsID)
+        try await kernel.setPresentation(activeSettingsID, isPresented: false)
+        let settingsClosed = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .modified(content: .modified(content: .modified(content: .navigationStack(
+                            .modified(_, modifier: .toolbar(let currentToolbar))), modifier: .sheet),
+                            modifier: .sheet(false, _, _)), modifier: .alert) = settingsClosed,
+              case .group(let currentTrailing) = currentToolbar[1].content,
+              case .button(_, let currentNoticeButton, _) = currentTrailing[1] else {
+            return XCTFail("Settings dismissal should write back")
+        }
+        _ = try await kernel.performAction(currentNoticeButton)
+        let noticeShown = try await kernel.lowerViewBody(in: source, typeName: "RootView")
+        guard case .modified(_, modifier: .alert("Hinweis", true, let activeNoticeID, _, .text("Eine Nachricht"))) = noticeShown else {
+            return XCTFail("Alert should open with its message")
+        }
+        XCTAssertNotEqual(noticeID, activeNoticeID)
+        try await kernel.setPresentation(activeNoticeID, isPresented: false)
+        let noticeState = try await kernel.evaluate("notice")
+        XCTAssertEqual(noticeState.value, "false")
+        _ = openSettings
+        _ = openNotice
+        _ = noticeButton
+    }
+
+    func testItemSheetBindsChallengeAndClearsItOnDismissal() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        struct Challenge { var id: String; var code: String }
+        var challenge: Challenge? = nil
+        """)
+        let source = """
+        Text("Anmeldung")
+            .sheet(item: $challenge) { current in
+                NavigationStack {
+                    VStack {
+                        Text(current.code)
+                        Button("Abbrechen", role: .cancel) { challenge = nil }
+                    }
+                }
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+            }
+        """
+        let empty = try await kernel.lowerViewExpression(source)
+        guard case .modified(_, modifier: .itemSheet(nil, _, .empty)) = empty else {
+            return XCTFail("Unpresented item sheet should not evaluate its content")
+        }
+        _ = try await kernel.evaluate("challenge = Challenge(id: \"login-1\", code: \"ABCD\")")
+        let shown = try await kernel.lowerViewExpression(source)
+        guard case .modified(_, modifier: .itemSheet(let item?, let inputID,
+                    .modified(content: .modified(content: .navigationStack(.verticalStack(_, _, let children)),
+                    modifier: .presentationDetentsMedium), modifier: .presentationDragIndicatorVisible))) = shown,
+              case .text("ABCD") = children[0],
+              case .button(_, let cancelID, _) = children[1] else {
+            return XCTFail("The sheet should bind the current challenge to its body")
+        }
+        XCTAssertEqual(item.id, RuntimeForEachID(rawValue: "6:String7:login-1"))
+        _ = try await kernel.performAction(cancelID)
+        let closed = try await kernel.lowerViewExpression(source)
+        guard case .modified(_, modifier: .itemSheet(nil, _, _)) = closed else {
+            return XCTFail("Cancellation should close the item sheet")
+        }
+        _ = try await kernel.evaluate("challenge = Challenge(id: \"login-2\", code: \"EFGH\")")
+        let reopened = try await kernel.lowerViewExpression(source)
+        guard case .modified(_, modifier: .itemSheet(_, let reopenedInputID, _)) = reopened else {
+            return XCTFail("Expected reopened item sheet")
+        }
+        try await kernel.setPresentation(reopenedInputID, isPresented: false)
+        let challengeState = try await kernel.evaluate("challenge == nil")
+        XCTAssertEqual(challengeState.value, "true")
+        _ = inputID
+    }
+
+    func testOnAppearAndOnChangeCaptureNewValueAndScrollRequest() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var phase = \"idle\"; var seen = \"\"; var appeared = 0")
+        let source = """
+        ScrollViewReader { proxy in
+            Text("Status")
+                .id("end")
+                .onAppear { appeared += 1 }
+                .onChange(of: phase) { next in
+                    seen = next
+                    proxy.scrollTo("end", anchor: .bottom)
+                }
+        }
+        """
+        let initial = try await kernel.lowerViewExpression(source)
+        guard case .scrollViewReader(_, .modified(content: .modified(_, modifier: .onAppear(let appearID)),
+                       modifier: .onChange("idle", _))) = initial else {
+            return XCTFail("Expected registered view events")
+        }
+        _ = try await kernel.performAction(appearID)
+        let appearances = try await kernel.evaluate("appeared")
+        XCTAssertEqual(appearances.value, "1")
+        _ = try await kernel.evaluate("phase = \"ready\"")
+        let refreshed = try await kernel.lowerViewExpression(source)
+        guard case .scrollViewReader(_, .modified(_, modifier: .onChange("ready", let changeID))) = refreshed else {
+            return XCTFail("onChange should observe the updated state")
+        }
+        let result = try await kernel.performAction(changeID)
+        let observed = try await kernel.evaluate("seen")
+        XCTAssertEqual(observed.value, "ready")
+        XCTAssertEqual(result.scrollRequest?.anchor, .bottom)
+    }
+
     func testNamedRootViewMethodIsPassedToComposerButton() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         _ = try await kernel.evaluate("var sent = \"\"")

@@ -64,6 +64,9 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     private let forEachBindingsByActionOffset: [Int: [RuntimeForEachItemBinding]]
     private let actionRecorder: RuntimeActionRecorder?
     private let resolvedInputValues: [Int: String]
+    private let resolvedPresentationBooleans: [Int: Bool]
+    private let resolvedPresentationItems: [Int: RuntimePresentedItem]
+    private let resolvedChangeValues: [Int: String]
     private let inputRecorder: RuntimeInputRecorder?
 
     public init() {
@@ -77,6 +80,9 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         self.forEachBindingsByActionOffset = [:]
         self.actionRecorder = nil
         self.resolvedInputValues = [:]
+        self.resolvedPresentationBooleans = [:]
+        self.resolvedPresentationItems = [:]
+        self.resolvedChangeValues = [:]
         self.inputRecorder = nil
     }
 
@@ -91,6 +97,9 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         forEachBindingsByActionOffset: [Int: [RuntimeForEachItemBinding]] = [:],
         actionRecorder: RuntimeActionRecorder? = nil,
         resolvedInputValues: [Int: String] = [:],
+        resolvedPresentationBooleans: [Int: Bool] = [:],
+        resolvedPresentationItems: [Int: RuntimePresentedItem] = [:],
+        resolvedChangeValues: [Int: String] = [:],
         inputRecorder: RuntimeInputRecorder? = nil
     ) {
         self.resolvedDynamicStrings = resolvedDynamicStrings
@@ -103,6 +112,9 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         self.forEachBindingsByActionOffset = forEachBindingsByActionOffset
         self.actionRecorder = actionRecorder
         self.resolvedInputValues = resolvedInputValues
+        self.resolvedPresentationBooleans = resolvedPresentationBooleans
+        self.resolvedPresentationItems = resolvedPresentationItems
+        self.resolvedChangeValues = resolvedChangeValues
         self.inputRecorder = inputRecorder
     }
 
@@ -135,6 +147,9 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             forEachBindingsByActionOffset: forEachBindingsByActionOffset,
             actionRecorder: recorder,
             resolvedInputValues: resolvedInputValues,
+            resolvedPresentationBooleans: resolvedPresentationBooleans,
+            resolvedPresentationItems: resolvedPresentationItems,
+            resolvedChangeValues: resolvedChangeValues,
             inputRecorder: inputRecorder
         )
         let node = try lowerer.lower(source)
@@ -190,6 +205,12 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         return try visitor.sites.map { site in
             RuntimeInputSite(offset: site.offset, source: try inputSource(site.expression))
         }
+    }
+
+    func presentationSites(in source: String) throws -> [RuntimePresentationSite] {
+        let visitor = RuntimePresentationSiteVisitor()
+        visitor.walk(try parseSyntaxTree(source))
+        return visitor.sites
     }
 
     private func parseSyntaxTree(_ source: String) throws -> SourceFileSyntax {
@@ -273,6 +294,12 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             return try lowerScrollView(call)
         case "ScrollViewReader":
             return try lowerScrollViewReader(call)
+        case "NavigationStack":
+            guard call.arguments.isEmpty, call.additionalTrailingClosures.isEmpty,
+                  let closure = call.trailingClosure else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            return .navigationStack(try lowerViewBuilderStatements(closure.statements))
         case "Group":
             return try lowerGroup(call)
         case "__SwiftPouchForEachGroup":
@@ -414,6 +441,10 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         let token = expression.trimmedDescription
         if token.hasPrefix("$") {
             let name = String(token.dropFirst())
+            if name.split(separator: ".").count > 1,
+               name.split(separator: ".").allSatisfy({ Self.validIdentifier(String($0)) }) {
+                return .projected(name)
+            }
             guard let first = name.first, first == "_" || first.isLetter,
                   name.dropFirst().allSatisfy({ $0 == "_" || $0.isLetter || $0.isNumber }) else {
                 throw RuntimeViewLoweringError.unsupportedArgument("Binding projection")
@@ -434,6 +465,11 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         }
         return .computed(getter: getter.trimmedDescription,
                          setter: setClosure.statements.description.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func validIdentifier(_ text: String) -> Bool {
+        guard let first = text.first, first == "_" || first.isLetter else { return false }
+        return text.dropFirst().allSatisfy { $0 == "_" || $0.isLetter || $0.isNumber }
     }
 
     private func lowerButton(_ call: FunctionCallExprSyntax) throws -> RuntimeViewNode {
@@ -821,6 +857,89 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             let id = actionRecorder?.record(action) ?? RuntimeActionID()
             return .modified(content: content, modifier: .onSubmit(id))
         }
+        if name == "onAppear" {
+            guard call.arguments.isEmpty, call.additionalTrailingClosures.isEmpty,
+                  let closure = call.trailingClosure, closure.signature == nil else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            let id = try recordViewAction(closure, at: call)
+            return .modified(content: content, modifier: .onAppear(id))
+        }
+        if name == "onChange" {
+            guard call.arguments.count == 1, call.arguments.first?.label?.text == "of",
+                  call.additionalTrailingClosures.isEmpty, let closure = call.trailingClosure,
+                  let argument = call.arguments.first else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            let offset = argument.expression.positionAfterSkippingLeadingTrivia.utf8Offset
+            let value = resolvedChangeValues[offset] ?? argument.expression.trimmedDescription
+            let id = try recordViewAction(closure, at: call)
+            return .modified(content: content, modifier: .onChange(value: value, actionID: id))
+        }
+        if name == "toolbar" {
+            guard call.arguments.isEmpty, call.additionalTrailingClosures.isEmpty,
+                  let closure = call.trailingClosure else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            let items = try closure.statements.flatMap { statement -> [RuntimeToolbarItem] in
+                guard let expression = statement.item.as(ExprSyntax.self),
+                      let itemCall = expression.as(FunctionCallExprSyntax.self),
+                      ["ToolbarItem", "ToolbarItemGroup"].contains(itemCall.calledExpression.trimmedDescription),
+                      itemCall.arguments.count == 1,
+                      let placement = itemCall.arguments.first,
+                      placement.label?.text == "placement",
+                      let placementName = staticMemberName(placement.expression),
+                      let parsed = RuntimeToolbarPlacement(rawValue: placementName),
+                      itemCall.additionalTrailingClosures.isEmpty,
+                      let body = itemCall.trailingClosure else {
+                    throw RuntimeViewLoweringError.unsupportedArgument("toolbar")
+                }
+                return [RuntimeToolbarItem(placement: parsed, content: try lowerViewBuilderStatements(body.statements))]
+            }
+            return .modified(content: content, modifier: .toolbar(items))
+        }
+        if name == "sheet" {
+            guard call.arguments.count == 1, call.additionalTrailingClosures.isEmpty,
+                  let argument = call.arguments.first, let closure = call.trailingClosure else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            let inputID = inputRecorder?.record(try inputSource(argument.expression)) ?? RuntimeInputID()
+            let offset = argument.expression.positionAfterSkippingLeadingTrivia.utf8Offset
+            let sheetContent = try lowerViewBuilderStatements(closure.statements)
+            switch argument.label?.text {
+            case "isPresented":
+                return .modified(content: content, modifier: .sheet(
+                    isPresented: resolvedPresentationBooleans[offset] ?? false,
+                    inputID: inputID, content: sheetContent
+                ))
+            case "item":
+                return .modified(content: content, modifier: .itemSheet(
+                    item: resolvedPresentationItems[offset], inputID: inputID, content: sheetContent
+                ))
+            default:
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+        }
+        if name == "alert" {
+            guard call.arguments.count == 2,
+                  let title = call.arguments.first, title.label == nil,
+                  let binding = call.arguments.last, binding.label?.text == "isPresented",
+                  let actions = call.trailingClosure,
+                  call.additionalTrailingClosures.count == 1,
+                  let message = call.additionalTrailingClosures.first,
+                  message.label.text == "message" else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            let inputID = inputRecorder?.record(try inputSource(binding.expression)) ?? RuntimeInputID()
+            let offset = binding.expression.positionAfterSkippingLeadingTrivia.utf8Offset
+            return .modified(content: content, modifier: .alert(
+                title: try stringValue(title.expression, viewName: name),
+                isPresented: resolvedPresentationBooleans[offset] ?? false,
+                inputID: inputID,
+                actions: try lowerViewBuilderStatements(actions.statements),
+                message: try lowerViewBuilderStatements(message.closure.statements)
+            ))
+        }
 
         guard call.trailingClosure == nil, call.additionalTrailingClosures.isEmpty else {
             throw RuntimeViewLoweringError.unsupportedModifier(name)
@@ -828,6 +947,27 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
 
         let modifier: RuntimeViewModifier
         switch name {
+        case "navigationTitle":
+            guard call.arguments.count == 1, let argument = call.arguments.first,
+                  argument.label == nil else { throw RuntimeViewLoweringError.unsupportedArgument(name) }
+            modifier = .navigationTitle(try stringValue(argument.expression, viewName: name))
+        case "navigationBarTitleDisplayMode":
+            guard call.arguments.count == 1, let argument = call.arguments.first,
+                  argument.label == nil, staticMemberName(argument.expression) == "inline" else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            modifier = .navigationBarTitleDisplayModeInline
+        case "presentationDetents":
+            guard call.arguments.count == 1, call.arguments.first?.expression.trimmedDescription == "[.medium]" else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            modifier = .presentationDetentsMedium
+        case "presentationDragIndicator":
+            guard call.arguments.count == 1,
+                  call.arguments.first.flatMap({ staticMemberName($0.expression) }) == "visible" else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            modifier = .presentationDragIndicatorVisible
         case "tag":
             guard call.arguments.count == 1, let argument = call.arguments.first,
                   argument.label == nil else { throw RuntimeViewLoweringError.unsupportedArgument(name) }
@@ -959,6 +1099,17 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         }
 
         return .modified(content: content, modifier: modifier)
+    }
+
+    private func recordViewAction(_ closure: ClosureExprSyntax, at call: FunctionCallExprSyntax) throws -> RuntimeActionID {
+        let action = closure.statements.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prepared = try ViewScrollSourceEditor.rewriteAction(
+            action, context: ViewScrollSourceEditor.context(enclosing: call)
+        )
+        let offset = call.positionAfterSkippingLeadingTrivia.utf8Offset
+        return actionRecorder?.record(
+            prepared, forEachBindings: forEachBindingsByActionOffset[offset] ?? []
+        ) ?? RuntimeActionID()
     }
 
     private func overlayModifier(
@@ -1497,6 +1648,10 @@ private final class ButtonCallOffsetVisitor: SyntaxVisitor {
         if node.calledExpression.trimmedDescription == "Button" {
             offsets.append(node.positionAfterSkippingLeadingTrivia.utf8Offset)
         }
+        if let member = node.calledExpression.as(MemberAccessExprSyntax.self),
+           ["onAppear", "onChange"].contains(member.declName.baseName.text) {
+            offsets.append(node.positionAfterSkippingLeadingTrivia.utf8Offset)
+        }
         return .visitChildren
     }
 }
@@ -1612,7 +1767,52 @@ struct LoweredRuntimeView: Sendable {
 
 enum RuntimeInputSource: Sendable {
     case state(String)
+    case projected(String)
     case computed(getter: String, setter: String)
+}
+
+struct RuntimePresentationSite: Sendable {
+    enum Kind: Equatable, Sendable { case boolean, item, change }
+    let kind: Kind
+    let offset: Int
+    let expression: String
+    let actionOffset: Int
+    let parameter: String?
+    let bodyRange: Range<Int>?
+}
+
+private final class RuntimePresentationSiteVisitor: SyntaxVisitor {
+    private(set) var sites: [RuntimePresentationSite] = []
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ call: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        if isInsideButtonActionClosure(call) { return .skipChildren }
+        guard let member = call.calledExpression.as(MemberAccessExprSyntax.self),
+              let argument = call.arguments.first(where: { ["isPresented", "item", "of"].contains($0.label?.text ?? "") }) else {
+            return .visitChildren
+        }
+        let name = member.declName.baseName.text
+        let kind: RuntimePresentationSite.Kind
+        switch (name, argument.label?.text) {
+        case ("sheet", "isPresented"), ("alert", "isPresented"): kind = .boolean
+        case ("sheet", "item"): kind = .item
+        case ("onChange", "of"): kind = .change
+        default: return .visitChildren
+        }
+        let closure = call.trailingClosure
+        let signature = closure?.signature?.trimmedDescription ?? ""
+        let rawParameter = signature.components(separatedBy: " in").first ?? ""
+        let parameter = rawParameter.trimmingCharacters(in: .whitespacesAndNewlines)
+        sites.append(RuntimePresentationSite(
+            kind: kind,
+            offset: argument.expression.positionAfterSkippingLeadingTrivia.utf8Offset,
+            expression: argument.expression.trimmedDescription,
+            actionOffset: call.positionAfterSkippingLeadingTrivia.utf8Offset,
+            parameter: parameter.isEmpty || parameter == "_" ? nil : parameter,
+            bodyRange: closure.map { $0.statements.positionAfterSkippingLeadingTrivia.utf8Offset..<$0.statements.endPositionBeforeTrailingTrivia.utf8Offset }
+        ))
+        return .visitChildren
+    }
 }
 
 struct RuntimeInputSite: Sendable {
@@ -1694,7 +1894,7 @@ func isInsideButtonActionClosure(_ node: some SyntaxProtocol) -> Bool {
                if call.calledExpression.trimmedDescription == "Button" {
                    return buttonActionClosure(in: call)
                }
-               if call.calledExpression.as(MemberAccessExprSyntax.self)?.declName.baseName.text == "onSubmit" {
+               if ["onSubmit", "onAppear", "onChange"].contains(call.calledExpression.as(MemberAccessExprSyntax.self)?.declName.baseName.text ?? "") {
                    return call.trailingClosure
                }
                return nil

@@ -3,6 +3,43 @@ import XCTest
 @testable import SwiftInterpreterCore
 
 final class RuntimeViewTests: XCTestCase {
+    func testNavigationToolbarAndPresentationTreeIsSerializable() throws {
+        let view = try SwiftUIViewExpressionLowerer().lowerRecordingActions("""
+        NavigationStack {
+            Text("Chat")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Verlauf") { print("open") }
+                    }
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        Button("Neu") { print("new") }
+                    }
+                }
+        }
+        .sheet(isPresented: $history) {
+            NavigationStack { Text("Chatverlauf").navigationTitle("Chatverlauf") }
+        }
+        .alert("Hinweis", isPresented: $notice) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Eine Nachricht")
+        }
+        .onAppear { print("mounted") }
+        """)
+        guard case .modified(content: .modified(content: .modified(content: .navigationStack,
+                            modifier: .sheet(_, let sheetInput, _)),
+                            modifier: .alert(_, _, let alertInput, _, _)),
+                            modifier: .onAppear(let appearID)) = view.node else {
+            return XCTFail("Expected navigation, sheet, alert and appearance event")
+        }
+        XCTAssertNotNil(view.inputs[sheetInput])
+        XCTAssertNotNil(view.inputs[alertInput])
+        XCTAssertNotNil(view.actions[appearID])
+        XCTAssertEqual(view.actions.count, 4)
+        XCTAssertEqual(try JSONDecoder().decode(RuntimeViewNode.self, from: JSONEncoder().encode(view.node)), view.node)
+    }
+
     func testLowererBuildsNativeInputAndSelectionContainers() throws {
         let view = try SwiftUIViewExpressionLowerer().lowerRecordingActions("""
         Form {

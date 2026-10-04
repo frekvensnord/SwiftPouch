@@ -140,6 +140,14 @@ sheets, alerts, `.onAppear`, and `.onChange`.
 **Done when:** history, settings, device-code dialogs, and notifications can be
 opened, updated, and dismissed from the target app.
 
+The interpreted view subset now lowers `NavigationStack`, the target's toolbar
+placements, title modifiers, Boolean and item sheets, alerts, medium detents,
+visible drag indicators, `.onAppear`, and `.onChange`. The native host writes
+presentation dismissal back to the interpreted binding, and event closures
+execute in the existing state scope. The target's object-backed store and
+session properties remain dependent on their separate observable-object and
+service bridges in the later milestones.
+
 ## Step 32 — Add Foundation, file-system, and UIKit bridges
 
 Provide the required forms of `URL`, `Data`, `Date`, `UUID`, JSON coding,

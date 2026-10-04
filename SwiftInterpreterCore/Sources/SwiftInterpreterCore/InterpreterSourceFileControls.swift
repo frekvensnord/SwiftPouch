@@ -23,6 +23,7 @@ public struct InterpreterSourceFileControls: View {
     @State private var isWorking = false
     @State private var pendingScenePhase: RuntimeScenePhase?
     @State private var pendingInputChanges: [RuntimeInputID: String] = [:]
+    @State private var pendingPresentationChanges: [RuntimeInputID: Bool] = [:]
     @State private var inputCommitTask: Task<Void, Never>?
 
     public init(kernel: InterpreterKernel) {
@@ -79,6 +80,9 @@ public struct InterpreterSourceFileControls: View {
                         },
                         onInput: { inputID, value in
                             queueInput(inputID, value: value)
+                        },
+                        onPresentation: { inputID, shown in
+                            queuePresentation(inputID, shown: shown)
                         }
                     )
                     .disabled(isWorking)
@@ -147,6 +151,7 @@ public struct InterpreterSourceFileControls: View {
         isWorking = true
         inputCommitTask?.cancel()
         pendingInputChanges.removeAll()
+        pendingPresentationChanges.removeAll()
         errorMessage = nil
         pendingScenePhase = nil
 
@@ -185,8 +190,37 @@ public struct InterpreterSourceFileControls: View {
             errorMessage = error.localizedDescription
         }
         isWorking = false
+        await commitPendingPresentations()
         await refreshPendingScenePhaseIfPossible()
         return requestsHostDismissal
+    }
+
+    private func queuePresentation(_ inputID: RuntimeInputID, shown: Bool) {
+        pendingPresentationChanges[inputID] = shown
+        Task { @MainActor in await commitPendingPresentations() }
+    }
+
+    private func commitPendingPresentations() async {
+        guard !isWorking, !pendingPresentationChanges.isEmpty,
+              let snapshot = appViewSnapshot else { return }
+        isWorking = true
+        let changes = pendingPresentationChanges
+        pendingPresentationChanges.removeAll()
+        errorMessage = nil
+        do {
+            for (id, shown) in changes {
+                try await kernel.setPresentation(id, isPresented: shown)
+            }
+            appViewSnapshot = try await kernel.refreshAppView(
+                snapshot,
+                scenePhase: Self.runtimeScenePhase(for: hostScenePhase)
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isWorking = false
+        if !pendingPresentationChanges.isEmpty { await commitPendingPresentations() }
+        await refreshPendingScenePhaseIfPossible()
     }
 
     private func queueInput(_ inputID: RuntimeInputID, value: String) {
@@ -229,6 +263,7 @@ public struct InterpreterSourceFileControls: View {
         isWorking = true
         inputCommitTask?.cancel()
         pendingInputChanges.removeAll()
+        pendingPresentationChanges.removeAll()
         errorMessage = nil
         appViewSnapshot = nil
         scrollRequest = nil

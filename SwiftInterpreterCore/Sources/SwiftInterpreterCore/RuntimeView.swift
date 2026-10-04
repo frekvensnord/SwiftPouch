@@ -108,6 +108,25 @@ public enum RuntimeButtonRole: String, Codable, Hashable, Sendable {
     case destructive
 }
 
+public enum RuntimeToolbarPlacement: String, Codable, Hashable, Sendable {
+    case topBarLeading, principal, topBarTrailing
+}
+
+public struct RuntimeToolbarItem: Codable, Equatable, Sendable {
+    public let placement: RuntimeToolbarPlacement
+    public let content: RuntimeViewNode
+
+    public init(placement: RuntimeToolbarPlacement, content: RuntimeViewNode) {
+        self.placement = placement
+        self.content = content
+    }
+}
+
+public struct RuntimePresentedItem: Codable, Equatable, Sendable, Identifiable {
+    public let id: RuntimeForEachID
+    public init(id: RuntimeForEachID) { self.id = id }
+}
+
 public enum RuntimePaddingEdges: String, Codable, Hashable, Sendable {
     case all
     case horizontal
@@ -269,6 +288,16 @@ public enum RuntimeViewModifier: Codable, Equatable, Sendable {
     case onSubmit(RuntimeActionID)
     case textInputAutocapitalizationNever
     case autocorrectionDisabled(Bool)
+    case navigationTitle(String)
+    case navigationBarTitleDisplayModeInline
+    case toolbar([RuntimeToolbarItem])
+    case sheet(isPresented: Bool, inputID: RuntimeInputID, content: RuntimeViewNode)
+    case itemSheet(item: RuntimePresentedItem?, inputID: RuntimeInputID, content: RuntimeViewNode)
+    case alert(title: String, isPresented: Bool, inputID: RuntimeInputID, actions: RuntimeViewNode, message: RuntimeViewNode)
+    case presentationDetentsMedium
+    case presentationDragIndicatorVisible
+    case onAppear(RuntimeActionID)
+    case onChange(value: String, actionID: RuntimeActionID)
 }
 
 /// A renderer-independent tree that interpreted view declarations can produce.
@@ -291,6 +320,7 @@ public indirect enum RuntimeViewNode: Codable, Equatable, Sendable {
     case forEach([RuntimeForEachItem])
     case scrollView(axis: RuntimeScrollAxis, showsIndicators: Bool, content: RuntimeViewNode)
     case scrollViewReader(id: String, content: RuntimeViewNode)
+    case navigationStack(RuntimeViewNode)
     case lazyVerticalStack(
         alignment: RuntimeHorizontalAlignment,
         spacing: Double?,
@@ -329,8 +359,12 @@ public struct SwiftUIRuntimeRenderer: View {
     private let onAction: @MainActor (RuntimeActionID) -> Void
     private let onActionWithDismissal: (@MainActor @Sendable (RuntimeActionID) async -> Bool)?
     private let onInput: @MainActor (RuntimeInputID, String) -> Void
+    private let onPresentation: @MainActor (RuntimeInputID, Bool) -> Void
     private let scrollRequest: RuntimeScrollRequest?
     @State private var localInputValues: [RuntimeInputID: String] = [:]
+    @State private var localPresentationValues: [RuntimeInputID: Bool] = [:]
+    @State private var localPresentedItems: [RuntimeInputID: RuntimePresentedItem] = [:]
+    @State private var locallyDismissedItems: Set<RuntimeInputID> = []
 
     @Environment(\.dismiss) private var hostDismissAction
 
@@ -338,12 +372,14 @@ public struct SwiftUIRuntimeRenderer: View {
         node: RuntimeViewNode,
         scrollRequest: RuntimeScrollRequest? = nil,
         onAction: @escaping @MainActor (RuntimeActionID) -> Void = { _ in },
-        onInput: @escaping @MainActor (RuntimeInputID, String) -> Void = { _, _ in }
+        onInput: @escaping @MainActor (RuntimeInputID, String) -> Void = { _, _ in },
+        onPresentation: @escaping @MainActor (RuntimeInputID, Bool) -> Void = { _, _ in }
     ) {
         self.node = node
         self.onAction = onAction
         self.onActionWithDismissal = nil
         self.onInput = onInput
+        self.onPresentation = onPresentation
         self.scrollRequest = scrollRequest
     }
 
@@ -355,12 +391,14 @@ public struct SwiftUIRuntimeRenderer: View {
         node: RuntimeViewNode,
         scrollRequest: RuntimeScrollRequest? = nil,
         onActionWithDismissal: @escaping @MainActor @Sendable (RuntimeActionID) async -> Bool,
-        onInput: @escaping @MainActor (RuntimeInputID, String) -> Void = { _, _ in }
+        onInput: @escaping @MainActor (RuntimeInputID, String) -> Void = { _, _ in },
+        onPresentation: @escaping @MainActor (RuntimeInputID, Bool) -> Void = { _, _ in }
     ) {
         self.node = node
         self.onAction = { _ in }
         self.onActionWithDismissal = onActionWithDismissal
         self.onInput = onInput
+        self.onPresentation = onPresentation
         self.scrollRequest = scrollRequest
     }
 
@@ -369,13 +407,15 @@ public struct SwiftUIRuntimeRenderer: View {
         scrollRequest: RuntimeScrollRequest?,
         onAction: @escaping @MainActor (RuntimeActionID) -> Void,
         onActionWithDismissal: (@MainActor @Sendable (RuntimeActionID) async -> Bool)?,
-        onInput: @escaping @MainActor (RuntimeInputID, String) -> Void
+        onInput: @escaping @MainActor (RuntimeInputID, String) -> Void,
+        onPresentation: @escaping @MainActor (RuntimeInputID, Bool) -> Void
     ) {
         self.node = node
         self.scrollRequest = scrollRequest
         self.onAction = onAction
         self.onActionWithDismissal = onActionWithDismissal
         self.onInput = onInput
+        self.onPresentation = onPresentation
     }
 
     @ViewBuilder
@@ -431,13 +471,16 @@ public struct SwiftUIRuntimeRenderer: View {
                     scrollRequest: scrollRequest,
                     onAction: onAction,
                     onActionWithDismissal: onActionWithDismissal,
-                    onInput: onInput
+                    onInput: onInput,
+                    onPresentation: onPresentation
                 )
                 .onAppear { applyScrollRequest(readerID: id, proxy: proxy) }
                 .onChange(of: scrollRequest?.token) { _ in
                     applyScrollRequest(readerID: id, proxy: proxy)
                 }
             }
+        case .navigationStack(let content):
+            NavigationStack { render(content) }
         case .lazyVerticalStack(let alignment, let spacing, let children):
             LazyVStack(alignment: horizontalAlignment(alignment), spacing: spacing.map { CGFloat($0) }) {
                 ForEach(children.indices, id: \.self) { index in
@@ -518,6 +561,26 @@ public struct SwiftUIRuntimeRenderer: View {
         })
     }
 
+    private func presentationBinding(_ id: RuntimeInputID, value: Bool) -> Binding<Bool> {
+        Binding(get: { localPresentationValues[id] ?? value }, set: { newValue in
+            localPresentationValues[id] = newValue
+            onPresentation(id, newValue)
+        })
+    }
+
+    private func itemBinding(_ id: RuntimeInputID, value: RuntimePresentedItem?) -> Binding<RuntimePresentedItem?> {
+        Binding(get: { locallyDismissedItems.contains(id) ? nil : localPresentedItems[id] ?? value }, set: { newValue in
+            if let newValue {
+                locallyDismissedItems.remove(id)
+                localPresentedItems[id] = newValue
+            } else {
+                locallyDismissedItems.insert(id)
+                localPresentedItems.removeValue(forKey: id)
+            }
+            onPresentation(id, newValue != nil)
+        })
+    }
+
     @ViewBuilder
     private func renderModified(
         _ content: RuntimeViewNode,
@@ -530,6 +593,76 @@ public struct SwiftUIRuntimeRenderer: View {
             render(content).submitLabel(.send)
         case .onSubmit(let actionID):
             render(content).onSubmit { dispatchAction(actionID) }
+        case .onAppear(let actionID):
+            render(content).onAppear { dispatchAction(actionID) }
+        case .onChange(let value, let actionID):
+            render(content).onChange(of: value) { _ in dispatchAction(actionID) }
+        case .navigationTitle(let title):
+            render(content).navigationTitle(title)
+        case .navigationBarTitleDisplayModeInline:
+            #if os(iOS)
+            render(content).navigationBarTitleDisplayMode(.inline)
+            #else
+            render(content)
+            #endif
+        case .toolbar(let items):
+            #if os(iOS)
+            render(content).toolbar {
+                if items.contains(where: { $0.placement == .topBarLeading }) {
+                    ToolbarItemGroup(placement: .navigationBarLeading) {
+                        ForEach(items.indices.filter { items[$0].placement == .topBarLeading }, id: \.self) { index in
+                            render(items[index].content)
+                        }
+                    }
+                }
+                if items.contains(where: { $0.placement == .principal }) {
+                    ToolbarItem(placement: .principal) {
+                        ForEach(items.indices.filter { items[$0].placement == .principal }, id: \.self) { index in
+                            render(items[index].content)
+                        }
+                    }
+                }
+                if items.contains(where: { $0.placement == .topBarTrailing }) {
+                    ToolbarItemGroup(placement: .navigationBarTrailing) {
+                        ForEach(items.indices.filter { items[$0].placement == .topBarTrailing }, id: \.self) { index in
+                            render(items[index].content)
+                        }
+                    }
+                }
+            }
+            #else
+            render(content).toolbar {
+                ToolbarItem(placement: .automatic) {
+                    ForEach(items.indices, id: \.self) { index in render(items[index].content) }
+                }
+            }
+            #endif
+        case .sheet(let presented, let inputID, let sheetContent):
+            render(content).sheet(isPresented: presentationBinding(inputID, value: presented)) {
+                nestedRenderer(sheetContent)
+            }
+        case .itemSheet(let item, let inputID, let sheetContent):
+            render(content).sheet(item: itemBinding(inputID, value: item)) { _ in
+                nestedRenderer(sheetContent)
+            }
+        case .alert(let title, let presented, let inputID, let actions, let message):
+            render(content).alert(title, isPresented: presentationBinding(inputID, value: presented)) {
+                render(actions)
+            } message: {
+                render(message)
+            }
+        case .presentationDetentsMedium:
+            #if os(iOS)
+            render(content).presentationDetents([.medium])
+            #else
+            render(content)
+            #endif
+        case .presentationDragIndicatorVisible:
+            #if os(iOS)
+            render(content).presentationDragIndicator(.visible)
+            #else
+            render(content)
+            #endif
         case .textInputAutocapitalizationNever:
             #if os(iOS)
             render(content).textInputAutocapitalization(.never)
@@ -583,6 +716,17 @@ public struct SwiftUIRuntimeRenderer: View {
         case .contentShape(let shape):
             renderContentShape(content, shape: shape)
         }
+    }
+
+    private func nestedRenderer(_ content: RuntimeViewNode) -> SwiftUIRuntimeRenderer {
+        SwiftUIRuntimeRenderer(
+            node: content,
+            scrollRequest: scrollRequest,
+            onAction: onAction,
+            onActionWithDismissal: onActionWithDismissal,
+            onInput: onInput,
+            onPresentation: onPresentation
+        )
     }
 
     private func scrollAxes(_ axis: RuntimeScrollAxis) -> Axis.Set {
