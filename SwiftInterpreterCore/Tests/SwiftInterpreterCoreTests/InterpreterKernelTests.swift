@@ -2580,7 +2580,7 @@ final class InterpreterKernelTests: XCTestCase {
         """#
         let id = "a179b210-1abd-41a8-8c84-4e5430ac143c"
         let first = InterpreterKernel(workspace: workspace)
-        let saved = try await first.evaluate(declarations + #"""
+        let saved = try await first.evaluate(declarations + "\n" + #"""
         let persistence = JSONChatPersistence.makeDefault()
         let id = UUID(uuidString: "a179b210-1abd-41a8-8c84-4e5430ac143c")!
         try persistence.saveIndex(ChatIndex(conversationIDs: [id], activeConversationID: id, preferences: ChatPreferences(selectedModelID: "gpt")))
@@ -2597,7 +2597,7 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: supportURL.appendingPathComponent("Conversations/conversation-\(id.uppercased()).json").path))
 
         let reopened = InterpreterKernel(workspace: workspace)
-        let loaded = try await reopened.evaluate(declarations + #"""
+        let loaded = try await reopened.evaluate(declarations + "\n" + #"""
         let persistence = JSONChatPersistence.makeDefault()
         let id = UUID(uuidString: "a179b210-1abd-41a8-8c84-4e5430ac143c")!
         let index = try persistence.loadIndex()
@@ -2608,13 +2608,35 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(loaded.value, "true|true|gpt|Erster Chat|true")
     }
 
+    func testTargetUIKitSystemBackgroundLowersForBackgroundAndForeground() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let background = try await kernel.lowerViewExpression(
+            "Text(\"Chat\").background(Color(uiColor: .systemBackground))"
+        )
+        XCTAssertEqual(background, .modified(
+            content: .text("Chat"),
+            modifier: .background(style: .color(.init(style: .systemBackground)), shape: nil)
+        ))
+        let foreground = try await kernel.lowerViewExpression(
+            "Text(\"Chat\").foregroundStyle(Color(uiColor: .systemBackground))"
+        )
+        XCTAssertEqual(foreground, .modified(
+            content: .text("Chat"),
+            modifier: .foregroundStyle(.systemBackground)
+        ))
+    }
+
     func testTargetPersistenceCannotWriteOutsideItsWorkspace() async throws {
         let workspace = try makeWorkspace()
         let outside = workspace.rootURL.deletingLastPathComponent().appendingPathComponent("outside.json")
         let kernel = InterpreterKernel(workspace: workspace)
+        let resolved = try await kernel.evaluate(#"""
+        import Foundation
+        URL.homeDirectory.deletingLastPathComponent().appendingPathComponent("outside.json").path
+        """#)
+        XCTAssertEqual(resolved.value, outside.path)
         do {
             _ = try await kernel.evaluate(#"""
-            import Foundation
             let outside = URL.homeDirectory.deletingLastPathComponent().appendingPathComponent("outside.json")
             try Data("blocked".utf8).write(to: outside, options: .atomic)
             """#)
