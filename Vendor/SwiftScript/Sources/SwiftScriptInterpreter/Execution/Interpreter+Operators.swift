@@ -219,16 +219,28 @@ extension Interpreter {
         case (.optional, _), (_, .optional):
             // `==` / `!=`. Swift lifts a non-optional operand to the
             // matching `Optional<T>` so `let a: Int? = 5; a == 5` is
-            // `Optional(5) == Optional(5)` → true. Mirror that lift.
+            // `Optional(5) == Optional(5)` → true. Compare present values
+            // with their registered operator, including boxed UUIDs.
             let liftedL: Value = { if case .optional = lhs { return lhs } else { return .optional(lhs) } }()
             let liftedR: Value = { if case .optional = rhs { return rhs } else { return .optional(rhs) } }()
-            switch op {
-            case "==": return .bool(liftedL == liftedR)
-            case "!=": return .bool(liftedL != liftedR)
-            default:
+            guard op == "==" || op == "!=" else {
                 throw RuntimeError.invalid(
                     "binary operator '\(op)' cannot be applied to operands of type '\(typeName(lhs))' and '\(typeName(rhs))'"
                 )
+            }
+            guard case .optional(let left) = liftedL,
+                  case .optional(let right) = liftedR else {
+                throw RuntimeError.invalid("optional comparison: failed to lift operands")
+            }
+            if let left, let right {
+                return try await applyBinary(
+                    op: op, lhs: left, lhsExpr: lhsExpr,
+                    rhs: right, rhsExpr: rhsExpr
+                )
+            }
+            switch op {
+            case "==": return .bool(left == nil && right == nil)
+            default: return .bool((left == nil) != (right == nil))
             }
         default:
             throw RuntimeError.invalid(
