@@ -1587,7 +1587,10 @@ public actor InterpreterKernel {
         activeBindings: [ViewConditionalBinding]
     ) -> String {
         activeBindings.reversed().reduce(expression) { nestedExpression, binding in
-            "if let \(binding.name)\(binding.typeAnnotation) = \(binding.initializer) { \(nestedExpression) } else { \(fallback) }"
+            if let pattern = binding.matchingPatternCondition {
+                return "if \(pattern) { \(nestedExpression) } else { \(fallback) }"
+            }
+            return "if let \(binding.name)\(binding.typeAnnotation) = \(binding.initializer) { \(nestedExpression) } else { \(fallback) }"
         }
     }
 }

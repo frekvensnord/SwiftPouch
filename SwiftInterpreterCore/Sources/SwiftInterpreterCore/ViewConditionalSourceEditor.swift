@@ -134,8 +134,9 @@ func viewConditionalClauses(in conditions: ConditionElementListSyntax) throws ->
             clauses.append(.matchingPattern(names.names.map { name in
                 ViewConditionalBinding(
                     name: name,
-                    initializer: "(if case \(pattern) = \(subject) { \(name) } else { nil })",
-                    typeAnnotation: ""
+                    initializer: subject,
+                    typeAnnotation: "",
+                    matchingPatternCondition: "case \(pattern) = \(subject)"
                 )
             }))
         default:
@@ -167,6 +168,19 @@ struct ViewConditionalBinding: Sendable, Hashable {
     let name: String
     let initializer: String
     let typeAnnotation: String
+    let matchingPatternCondition: String?
+
+    init(
+        name: String,
+        initializer: String,
+        typeAnnotation: String,
+        matchingPatternCondition: String? = nil
+    ) {
+        self.name = name
+        self.initializer = initializer
+        self.typeAnnotation = typeAnnotation
+        self.matchingPatternCondition = matchingPatternCondition
+    }
 
     var declaration: String {
         "let \(name)\(typeAnnotation) = \(initializer)"
