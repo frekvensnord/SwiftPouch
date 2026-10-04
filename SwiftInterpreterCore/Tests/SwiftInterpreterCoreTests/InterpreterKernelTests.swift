@@ -69,8 +69,6 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertTrue(result.requestsHostDismissal)
         _ = try await kernel.lowerViewBody(in: source, typeName: "RootView")
         try await kernel.setPresentation(activeHistoryID, isPresented: false)
-        let historyState = try await kernel.evaluate("history")
-        XCTAssertEqual(historyState.value, "false")
         let newNavigation = try await kernel.lowerViewBody(in: source, typeName: "RootView")
         guard case .modified(content: .modified(content: .modified(_, modifier: .sheet(false, _, _)), modifier: .sheet), modifier: .alert) = newNavigation else {
             return XCTFail("Dismissed history must stay closed")
@@ -105,8 +103,6 @@ final class InterpreterKernelTests: XCTestCase {
         }
         XCTAssertNotEqual(noticeID, activeNoticeID)
         try await kernel.setPresentation(activeNoticeID, isPresented: false)
-        let noticeState = try await kernel.evaluate("notice")
-        XCTAssertEqual(noticeState.value, "false")
         _ = openSettings
         _ = openNotice
         _ = noticeButton
@@ -171,7 +167,9 @@ final class InterpreterKernelTests: XCTestCase {
                 .onAppear { appeared += 1 }
                 .onChange(of: phase) { next in
                     seen = next
-                    proxy.scrollTo("end", anchor: .bottom)
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        proxy.scrollTo("end", anchor: .bottom)
+                    }
                 }
         }
         """

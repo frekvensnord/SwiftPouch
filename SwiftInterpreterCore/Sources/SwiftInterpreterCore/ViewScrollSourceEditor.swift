@@ -48,6 +48,7 @@ enum ViewScrollSourceEditor {
     }
 
     static func rewriteAction(_ source: String, context: ViewScrollReaderContext?) throws -> String {
+        let source = try unwrapViewAnimation(source)
         let tree = Parser.parse(source: source)
         guard !tree.hasError else { throw RuntimeViewLoweringError.malformedSyntax }
         guard let context else { return source }
@@ -86,6 +87,41 @@ enum ViewScrollSourceEditor {
             bytes.replaceSubrange(range, with: replacement.utf8)
         }
         return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// SwiftUI's animation wrapper is a host display instruction. Run the
+    /// enclosed interpreted state/scroll action without evaluating that host
+    /// function as user code.
+    private static func unwrapViewAnimation(_ source: String) throws -> String {
+        var result = source
+        for _ in 0..<64 {
+            let tree = Parser.parse(source: result)
+            guard !tree.hasError else { throw RuntimeViewLoweringError.malformedSyntax }
+            let visitor = AnimationCallVisitor()
+            visitor.walk(tree)
+            guard let call = visitor.call else { return result }
+            guard call.arguments.count <= 1, call.additionalTrailingClosures.isEmpty,
+                  let closure = call.trailingClosure, closure.signature == nil else {
+                throw RuntimeViewLoweringError.unsupportedArgument("withAnimation")
+            }
+            let range = call.positionAfterSkippingLeadingTrivia.utf8Offset..<call.endPositionBeforeTrailingTrivia.utf8Offset
+            var bytes = Array(result.utf8)
+            bytes.replaceSubrange(range, with: closure.statements.description.utf8)
+            result = String(decoding: bytes, as: UTF8.self)
+        }
+        throw RuntimeViewLoweringError.unsupportedArgument("withAnimation nesting")
+    }
+}
+
+private final class AnimationCallVisitor: SyntaxVisitor {
+    private(set) var call: FunctionCallExprSyntax?
+    init() { super.init(viewMode: .sourceAccurate) }
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        if call == nil, node.calledExpression.trimmedDescription == "withAnimation" {
+            call = node
+            return .skipChildren
+        }
+        return .visitChildren
     }
 }
 

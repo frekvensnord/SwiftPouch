@@ -903,7 +903,8 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
                   let argument = call.arguments.first, let closure = call.trailingClosure else {
                 throw RuntimeViewLoweringError.unsupportedArgument(name)
             }
-            let inputID = inputRecorder?.record(try inputSource(argument.expression)) ?? RuntimeInputID()
+            let bindingSource = try inputSource(argument.expression)
+            let inputID = inputRecorder?.record(bindingSource) ?? RuntimeInputID()
             let offset = argument.expression.positionAfterSkippingLeadingTrivia.utf8Offset
             let sheetContent = try lowerViewBuilderStatements(closure.statements)
             switch argument.label?.text {
@@ -930,7 +931,8 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
                   message.label.text == "message" else {
                 throw RuntimeViewLoweringError.unsupportedArgument(name)
             }
-            let inputID = inputRecorder?.record(try inputSource(binding.expression)) ?? RuntimeInputID()
+            let bindingSource = try inputSource(binding.expression)
+            let inputID = inputRecorder?.record(bindingSource) ?? RuntimeInputID()
             let offset = binding.expression.positionAfterSkippingLeadingTrivia.utf8Offset
             return .modified(content: content, modifier: .alert(
                 title: try stringValue(title.expression, viewName: name),

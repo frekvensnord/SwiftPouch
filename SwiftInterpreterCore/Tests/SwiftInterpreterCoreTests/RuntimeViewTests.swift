@@ -494,7 +494,7 @@ final class RuntimeViewTests: XCTestCase {
             )
         )
         XCTAssertThrowsError(try lowerer.lower("Text(\"x\").sheet(isPresented: true) { Text(\"Sheet\") }")) { error in
-            XCTAssertEqual(error as? RuntimeViewLoweringError, .unsupportedModifier("sheet"))
+            XCTAssertEqual(error as? RuntimeViewLoweringError, .unsupportedArgument("Binding"))
         }
     }
 }
