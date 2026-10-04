@@ -23,12 +23,21 @@ struct SwiftScriptSourceAdapter: Sendable {
         var edits: [(range: Range<Int>, replacement: String)] = []
         var classes: [String: ClassDeclSyntax] = [:]
         var enumVariableTypes: [String: String] = [:]
+        var classEnumProperties: [String: [String: String]] = [:]
         var enumCaseOwners: [String: String] = [:]
         var ambiguousEnumCases: Set<String> = []
 
         for statement in parsed.sourceFile.statements {
             if let declaration = statement.item.as(DeclSyntax.self)?.as(ClassDeclSyntax.self) {
                 classes[declaration.name.text] = declaration
+                for member in declaration.memberBlock.members {
+                    guard let variable = member.decl.as(VariableDeclSyntax.self) else { continue }
+                    for binding in variable.bindings {
+                        guard let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text,
+                              let type = binding.typeAnnotation?.type.as(IdentifierTypeSyntax.self) else { continue }
+                        classEnumProperties[declaration.name.text, default: [:]][name] = type.name.text
+                    }
+                }
             }
             if let declaration = statement.item.as(DeclSyntax.self)?.as(EnumDeclSyntax.self) {
                 for member in declaration.memberBlock.members {
@@ -125,7 +134,8 @@ struct SwiftScriptSourceAdapter: Sendable {
         for name in ambiguousEnumCases { enumCaseOwners.removeValue(forKey: name) }
         let visitor = CompatibilityExpressionVisitor(
             enumVariableTypes: enumVariableTypes,
-            enumCaseOwners: enumCaseOwners
+            enumCaseOwners: enumCaseOwners,
+            classEnumProperties: classEnumProperties
         )
         visitor.walk(parsed.sourceFile)
         edits.append(contentsOf: visitor.edits)
@@ -148,11 +158,17 @@ struct SwiftScriptSourceAdapter: Sendable {
 private final class CompatibilityExpressionVisitor: SyntaxVisitor {
     let enumVariableTypes: [String: String]
     let enumCaseOwners: [String: String]
+    let classEnumProperties: [String: [String: String]]
     private(set) var edits: [(range: Range<Int>, replacement: String)] = []
 
-    init(enumVariableTypes: [String: String], enumCaseOwners: [String: String]) {
+    init(
+        enumVariableTypes: [String: String],
+        enumCaseOwners: [String: String],
+        classEnumProperties: [String: [String: String]]
+    ) {
         self.enumVariableTypes = enumVariableTypes
         self.enumCaseOwners = enumCaseOwners
+        self.classEnumProperties = classEnumProperties
         super.init(viewMode: .sourceAccurate)
     }
 
@@ -165,6 +181,26 @@ private final class CompatibilityExpressionVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: InfixOperatorExprSyntax) -> SyntaxVisitorContinueKind {
+        if node.operator.is(AssignmentExprSyntax.self) {
+            let propertyName = node.leftOperand.as(DeclReferenceExprSyntax.self)?.baseName.text
+                ?? node.leftOperand.as(MemberAccessExprSyntax.self)?.declName.baseName.text
+            let implicitCase = node.rightOperand.as(FunctionCallExprSyntax.self)?
+                .calledExpression.as(MemberAccessExprSyntax.self)
+                ?? node.rightOperand.as(MemberAccessExprSyntax.self)
+            if let propertyName, let implicitCase, implicitCase.base == nil {
+                var ancestor = node.parent
+                while let current = ancestor {
+                    if let type = current.as(ClassDeclSyntax.self) {
+                        if let enumName = classEnumProperties[type.name.text]?[propertyName] {
+                            let insertion = implicitCase.positionAfterSkippingLeadingTrivia.utf8Offset
+                            edits.append((range: insertion..<insertion, replacement: enumName))
+                        }
+                        break
+                    }
+                    ancestor = current.parent
+                }
+            }
+        }
         guard node.operator.trimmedDescription == "==",
               let variable = node.leftOperand.as(DeclReferenceExprSyntax.self),
               let enumType = enumVariableTypes[variable.baseName.text],
