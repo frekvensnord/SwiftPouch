@@ -2,6 +2,12 @@ import XCTest
 @testable import SwiftInterpreterCore
 
 final class SourceAnalysisTests: XCTestCase {
+    func testSecurityImportHasInstalledProjectBridge() {
+        let analysis = SourceAnalyzer().analyze("import Foundation\nimport Security\n")
+        XCTAssertTrue(analysis.isReadyForEvaluation)
+        XCTAssertFalse(analysis.diagnostics.contains { $0.code == .moduleHostBridgeRequired })
+    }
+
     func testClassifiesTargetAppModulesAndSwiftUIRequirements() {
         let source = """
         import SwiftUI

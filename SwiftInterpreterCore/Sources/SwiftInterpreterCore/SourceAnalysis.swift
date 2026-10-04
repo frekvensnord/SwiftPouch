@@ -107,7 +107,7 @@ public struct SourceAnalyzer: Sendable {
             }
 
             switch registration.integration {
-            case .interpreterBuiltIn:
+            case .interpreterBuiltIn, .hostBridgeInstalled:
                 break
             case .hostBridgeRequired:
                 diagnostics.append(SourceDiagnostic(

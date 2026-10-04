@@ -5,6 +5,9 @@ public enum ModuleIntegration: String, Codable, Hashable, Sendable {
     /// The upstream interpreter already supplies this module.
     case interpreterBuiltIn
 
+    /// The interpreter host installs a scoped module when it is imported.
+    case hostBridgeInstalled
+
     /// The host still needs to provide a narrow bridge for this module.
     case hostBridgeRequired
 
@@ -84,8 +87,8 @@ public struct InterpreterModuleRegistry: Sendable {
             ),
             ModuleRegistration(
                 name: "Security",
-                integration: .hostBridgeRequired,
-                summary: "Requires a scoped Keychain and authentication bridge."
+                integration: .hostBridgeInstalled,
+                summary: "Project-scoped generic-password Keychain operations are installed by the host."
             ),
             ModuleRegistration(
                 name: "UIKit",
