@@ -2445,6 +2445,91 @@ final class InterpreterKernelTests: XCTestCase {
         }
     }
 
+    func testTargetFoundationURLAndStringConversions() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let result = try await kernel.evaluate(#"""
+        import Foundation
+        let base = URL(string: "https://example.com/api")!
+        let endpoint = base.appendingPathComponent("models", isDirectory: true)
+        let missing = URL(string: "http://[") == nil
+        let clean = "  hello WORLD \n".trimmingCharacters(in: .whitespacesAndNewlines)
+        let encoded = "a b".addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz"))!
+        "\(endpoint.absoluteString)|\(missing)|\(clean.capitalized)|\(clean.lowercased())|\(encoded)|\(clean.replacingOccurrences(of: "WORLD", with: "Swift"))"
+        """#)
+        XCTAssertEqual(result.value, "https://example.com/api/models/|true|Hello World|hello world|a%20b|hello Swift")
+    }
+
+    func testTargetFoundationDataAndBase64Conversions() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let result = try await kernel.evaluate(#"""
+        import Foundation
+        var bytes = Data("Hi".utf8)
+        bytes.append(Data("!".utf8))
+        let encoded = bytes.base64EncodedString()
+        let decoded = Data(base64Encoded: encoded)!
+        let invalid = Data(base64Encoded: "not base64?") == nil
+        let text = String(data: decoded, encoding: .utf8)!
+        let textData = text.data(using: .utf8)!
+        "\(encoded)|\(text)|\(textData.count)|\(invalid)"
+        """#)
+        XCTAssertEqual(result.value, "SGkh|Hi!|3|true")
+    }
+
+    func testTargetFoundationDatesAndIdentifiers() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let result = try await kernel.evaluate(#"""
+        import Foundation
+        let start = Date(timeIntervalSince1970: 1000)
+        let later = start.addingTimeInterval(900)
+        let id = UUID()
+        let restored = UUID(uuidString: id.uuidString)!
+        let invalid = UUID(uuidString: "invalid") == nil
+        let display = later.formatted(date: .abbreviated, time: .shortened)
+        "\(later > start)|\(later.timeIntervalSince(start))|\(restored == id)|\(invalid)|\(!display.isEmpty)"
+        """#)
+        XCTAssertEqual(result.value, "true|900.0|true|true|true")
+    }
+
+    func testTargetFoundationCodableConversationRoundTrip() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let result = try await kernel.evaluate(#"""
+        import Foundation
+        enum ChatRole: String, Codable { case user, assistant }
+        struct ChatMessage: Codable {
+            var id: UUID
+            var role: ChatRole
+            var text: String
+            var createdAt: Date
+            var modelID: String?
+        }
+        struct ChatConversation: Codable {
+            var id: UUID
+            var messages: [ChatMessage]
+        }
+        let id = UUID()
+        let message = ChatMessage(id: id, role: .assistant, text: "hello", createdAt: Date(timeIntervalSince1970: 1000), modelID: nil)
+        let original = ChatConversation(id: id, messages: [message])
+        let bytes = try JSONEncoder().encode(original)
+        let restored = try JSONDecoder().decode(ChatConversation.self, from: bytes)
+        "\(restored.id == id)|\(restored.messages[0].role == .assistant)|\(restored.messages[0].text)|\(restored.messages[0].modelID == nil)|\(restored.messages[0].createdAt.timeIntervalSince1970)"
+        """#)
+        XCTAssertEqual(result.value, "true|true|hello|true|1000.0")
+    }
+
+    func testTargetFoundationUntypedJSONRoundTrip() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let result = try await kernel.evaluate(#"""
+        import Foundation
+        let data = try JSONSerialization.data(withJSONObject: ["client_id": "abc", "enabled": true, "count": 3])
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        let client = object["client_id"] as? String ?? "missing"
+        let enabled = object["enabled"] as? Bool ?? false
+        let count = object["count"] as? Int ?? 0
+        "\(client)|\(enabled)|\(count)"
+        """#)
+        XCTAssertEqual(result.value, "abc|true|3")
+    }
+
     private func textValues(in node: RuntimeViewNode) -> [String] {
         switch node {
         case .text(let value):

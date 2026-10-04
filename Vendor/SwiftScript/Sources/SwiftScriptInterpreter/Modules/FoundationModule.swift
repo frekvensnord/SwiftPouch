@@ -42,6 +42,26 @@ public struct FoundationModule: BuiltinModule {
         registerProcessStandardStreams(into: i)
         registerNumericConversions(into: i)
         registerDataAppend(into: i)
+        registerTargetDateFormatting(into: i)
+    }
+
+    // The generated Date bridge exposes formatted() but not the labelled
+    // date/time convenience used by the chat history row. Bridged receivers
+    // defer implicit enum members to the callee, so resolve just this actual
+    // target-app pair here and leave other styles to the existing bridge.
+    private func registerTargetDateFormatting(into i: Interpreter) {
+        i.bridges["func Date.formatted(date:time:)"] = .method { receiver, args in
+            guard args.count == 2,
+                  case .enumValue(_, caseName: "abbreviated", _) = args[0],
+                  case .enumValue(_, caseName: "shortened", _) = args[1]
+            else {
+                throw RuntimeError.invalid(
+                    "Date.formatted(date:time:): expected .abbreviated and .shortened"
+                )
+            }
+            let date: Date = try unboxOpaque(receiver, as: Date.self, typeName: "Date")
+            return .string(date.formatted(date: .abbreviated, time: .shortened))
+        }
     }
 
     // MARK: - Numeric-conversion inits
@@ -605,4 +625,3 @@ public struct FoundationModule: BuiltinModule {
         i.bridges["func String.components()"] = Self.stringComponentsBridge
     }
 }
-
