@@ -1,6 +1,6 @@
 import Foundation
-import SwiftParser
 import SwiftSyntax
+import SwiftScriptAST
 
 /// Errors reported while lowering the supported static SwiftUI expression subset.
 public enum RuntimeViewLoweringError: Error, LocalizedError, Equatable, Sendable {
@@ -193,7 +193,10 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
     }
 
     private func parseSyntaxTree(_ source: String) throws -> SourceFileSyntax {
-        let syntaxTree = Parser.parse(source: source)
+        // Match the interpreter's operator folding. SwiftParser initially
+        // represents ternaries and infix operators as sequence expressions;
+        // controls need the folded ternary to choose a dynamic style.
+        let syntaxTree = ScriptParser.parse(source).sourceFile
         guard !syntaxTree.hasError else {
             throw RuntimeViewLoweringError.malformedSyntax
         }
