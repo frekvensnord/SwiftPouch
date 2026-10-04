@@ -120,15 +120,12 @@ struct AppSourceBootstrapper: Sendable {
                     statements.append(variable.trimmedDescription)
                     continue
                 }
-                guard let assignment = statement.item.as(ExprSyntax.self)?
-                        .as(InfixOperatorExprSyntax.self),
-                      assignment.operator.is(AssignmentExprSyntax.self),
-                      let target = assignment.leftOperand.as(DeclReferenceExprSyntax.self),
+                guard let expression = statement.item.as(ExprSyntax.self),
+                      let (target, call) = stateObjectAssignment(expression),
                       target.baseName.text.hasPrefix("_"),
                       let object = declarations.first(where: {
                           "_" + $0.name == target.baseName.text && $0.isOwned
                       }),
-                      let call = assignment.rightOperand.as(FunctionCallExprSyntax.self),
                       call.calledExpression.trimmedDescription.split(separator: ".").last == "StateObject",
                       let wrapped = call.arguments.first(where: { $0.label?.text == "wrappedValue" }),
                       initialized.insert(object.name).inserted else {
@@ -148,5 +145,25 @@ struct AppSourceBootstrapper: Sendable {
             statements.append("let \(object.storageName) = \(expression)")
         }
         return statements
+    }
+
+    private func stateObjectAssignment(
+        _ expression: ExprSyntax
+    ) -> (DeclReferenceExprSyntax, FunctionCallExprSyntax)? {
+        if let assignment = expression.as(InfixOperatorExprSyntax.self),
+           assignment.operator.is(AssignmentExprSyntax.self),
+           let target = assignment.leftOperand.as(DeclReferenceExprSyntax.self),
+           let call = assignment.rightOperand.as(FunctionCallExprSyntax.self) {
+            return (target, call)
+        }
+        if let sequence = expression.as(SequenceExprSyntax.self) {
+            let elements = Array(sequence.elements)
+            if elements.count == 3, elements[1].is(AssignmentExprSyntax.self),
+               let target = elements[0].as(DeclReferenceExprSyntax.self),
+               let call = elements[2].as(FunctionCallExprSyntax.self) {
+                return (target, call)
+            }
+        }
+        return nil
     }
 }
