@@ -487,7 +487,13 @@ public struct SwiftUIRuntimeRenderer: View {
         case .navigationStack(let content):
             NavigationStack { render(content) }
         case .list(let content):
-            List { render(content) }
+            if case .forEach(let items) = content {
+                List {
+                    ForEach(items, id: \.id) { item in render(item.content) }
+                }
+            } else {
+                List { render(content) }
+            }
         case .link(let destination, let label):
             if let url = URL(string: destination), ["https", "http"].contains(url.scheme?.lowercased() ?? "") {
                 Link(destination: url) { render(label) }
