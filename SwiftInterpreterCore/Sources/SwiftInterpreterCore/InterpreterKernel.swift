@@ -81,7 +81,8 @@ public actor InterpreterKernel {
     private let customViewSourceExpander: CustomViewSourceExpander
     private let appEntryPointSourceExtractor: AppEntryPointSourceExtractor
     private let scriptSourceAdapter: SwiftScriptSourceAdapter
-    private var interpreter = Interpreter()
+    private let keychainBackend: any ProjectKeychainBackend
+    private var interpreter: Interpreter
     private var optionalVariableTypes: [String: String] = [:]
     private var initializedViewStateOwners: [String: String] = [:]
     private var registeredRuntimeActions: [RuntimeActionID: RuntimeActionRegistration] = [:]
@@ -95,8 +96,14 @@ public actor InterpreterKernel {
     private var evaluationWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(workspace: ProjectWorkspace, sourceAnalyzer: SourceAnalyzer = SourceAnalyzer()) {
+        self.init(workspace: workspace, sourceAnalyzer: sourceAnalyzer, keychainBackend: SystemProjectKeychainBackend())
+    }
+
+    init(workspace: ProjectWorkspace, sourceAnalyzer: SourceAnalyzer = SourceAnalyzer(),
+         keychainBackend: any ProjectKeychainBackend) {
         self.workspace = workspace
         self.sourceAnalyzer = sourceAnalyzer
+        self.keychainBackend = keychainBackend
         self.sourceFileStore = ProjectSourceFileStore(workspace: workspace)
         self.viewExpressionLowerer = SwiftUIViewExpressionLowerer()
         self.viewConditionalSourceEditor = ViewConditionalSourceEditor()
@@ -105,6 +112,9 @@ public actor InterpreterKernel {
         self.customViewSourceExpander = CustomViewSourceExpander()
         self.appEntryPointSourceExtractor = AppEntryPointSourceExtractor()
         self.scriptSourceAdapter = SwiftScriptSourceAdapter()
+        let interpreter = Interpreter()
+        interpreter.registerOnImport("Security", module: ProjectKeychainModule(projectID: workspace.id, backend: keychainBackend))
+        self.interpreter = interpreter
     }
 
     /// Reports imports, known runtime requirements, and source diagnostics.
@@ -716,6 +726,7 @@ public actor InterpreterKernel {
 
     private func resetInterpreterScope() {
         interpreter = Interpreter()
+        interpreter.registerOnImport("Security", module: ProjectKeychainModule(projectID: workspace.id, backend: keychainBackend))
         optionalVariableTypes.removeAll()
         initializedViewStateOwners.removeAll()
         registeredRuntimeActions.removeAll()

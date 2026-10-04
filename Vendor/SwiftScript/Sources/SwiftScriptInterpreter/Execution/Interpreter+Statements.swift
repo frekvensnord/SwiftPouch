@@ -148,6 +148,15 @@ extension Interpreter {
             }
             let name = pattern.identifier.text
             guard let initializer = binding.initializer else {
+                // Swift initializes an unassigned optional `var` to nil.
+                // The Keychain's `var result: CFTypeRef?` relies on this
+                // before SecItemCopyMatching writes through `&result`.
+                if mutable, let type = binding.typeAnnotation?.type,
+                   type.is(OptionalTypeSyntax.self) {
+                    try validateType(type)
+                    scope.bind(name, value: .optional(nil), mutable: true, declaredType: type)
+                    continue
+                }
                 throw RuntimeError.invalid(
                     "binding '\(name)' must have an initializer (uninitialized declarations not yet supported)"
                 )

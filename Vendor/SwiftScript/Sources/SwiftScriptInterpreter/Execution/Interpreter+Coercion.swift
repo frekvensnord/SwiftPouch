@@ -506,6 +506,7 @@ extension Interpreter {
 
     func isKnownType(_ name: String) -> Bool {
         if isTypeName(name) { return true }
+        if name == "CFTypeRef", isImported(any: "Security") { return true }
         // Generic-parameter names introduced by an enclosing func/struct
         // decl. We don't enforce constraints, but the names need to
         // resolve as types when validating their use.

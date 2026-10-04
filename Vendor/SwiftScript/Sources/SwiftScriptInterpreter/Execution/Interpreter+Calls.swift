@@ -442,6 +442,26 @@ extension Interpreter {
             )
         }
 
+        // SecItemCopyMatching writes a CFTypeRef through its second argument.
+        // Keep this one host API's out parameter in the caller's scope; ordinary
+        // builtins have no declared inout parameters and cannot write it back.
+        if let ref = call.calledExpression.as(DeclReferenceExprSyntax.self),
+           ref.baseName.text == "SecItemCopyMatching",
+           isImported(any: "Security"),
+           case .builtin = fn.kind,
+           call.arguments.count == 2,
+           let output = call.arguments.last?.expression.as(InOutExprSyntax.self),
+           let path = parseLValuePath(output.expression)
+        {
+            let query = try await evaluate(call.arguments.first!.expression, in: scope)
+            let answer = try await invoke(fn, args: [query])
+            guard case .tuple(let pair, _) = answer, pair.count == 2 else {
+                throw RuntimeError.invalid("SecItemCopyMatching bridge returned no status and result")
+            }
+            try await writeLValuePath(path, value: pair[1], in: scope)
+            return pair[0]
+        }
+
         // Evaluate args alongside their syntax so we can coerce against
         // the parameter's declared type (literal-polymorphism rules).
         // Generic-parameter scope is pushed for the duration of arg
