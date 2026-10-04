@@ -47,7 +47,7 @@ final class ProjectKeychainBridgeTests: XCTestCase {
     import Security
     struct Credentials: Codable { var token: String }
     final class KeychainCredentialStore {
-        private let service = "SwiftChat.codex-session"
+        private let service = Bundle.main.bundleIdentifier.map { $0 + ".codex-session" } ?? "SwiftChat.codex-session"
         private let account = "oauth"
 
         func readCredentials() throws -> Credentials? {
