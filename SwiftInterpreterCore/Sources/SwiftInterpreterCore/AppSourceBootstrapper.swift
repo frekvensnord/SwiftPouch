@@ -71,6 +71,16 @@ struct AppSourceBootstrapper: Sendable {
             }
             let insertion = binding.endPositionBeforeTrailingTrivia.utf8Offset - offset
             edits.append((insertion..<insertion, " { didSet { __swiftpouch_publishedChange() } }"))
+            if let initializer = binding.initializer?.value,
+               let member = initializer.as(MemberAccessExprSyntax.self),
+               member.base == nil,
+               let type = binding.typeAnnotation?.type.as(IdentifierTypeSyntax.self) {
+                edits.append((
+                    initializer.positionAfterSkippingLeadingTrivia.utf8Offset - offset
+                        ..< initializer.endPositionBeforeTrailingTrivia.utf8Offset - offset,
+                    "\(type.name.text).\(member.declName.baseName.text)"
+                ))
+            }
             for attribute in published {
                 edits.append((attribute.positionAfterSkippingLeadingTrivia.utf8Offset - offset
                     ..< attribute.endPositionBeforeTrailingTrivia.utf8Offset - offset, ""))
