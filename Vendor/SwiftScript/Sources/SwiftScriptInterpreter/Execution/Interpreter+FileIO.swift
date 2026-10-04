@@ -110,6 +110,9 @@ extension Interpreter {
                 }
             }
         case "removeItem":
+            // URL-form removal belongs to the generated bridge, which
+            // authorizes and consumes the translated file URL.
+            if labels?.first == "at" { break }
             try expectStringArg(args, methodName: "FileManager.removeItem(atPath:)")
             if case .string(let path) = args[0] {
                 let hostPath = try await gatePath(path, for: .delete,
@@ -122,6 +125,7 @@ extension Interpreter {
                 }
             }
         case "createDirectory":
+            if labels?.first == "at" { break }
             // Accept the (atPath:withIntermediateDirectories:) form,
             // ignoring optional attributes.
             guard args.count >= 2,

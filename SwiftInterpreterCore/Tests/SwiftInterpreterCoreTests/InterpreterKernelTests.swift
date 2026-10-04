@@ -2630,14 +2630,11 @@ final class InterpreterKernelTests: XCTestCase {
         let workspace = try makeWorkspace()
         let outside = workspace.rootURL.deletingLastPathComponent().appendingPathComponent("outside.json")
         let kernel = InterpreterKernel(workspace: workspace)
-        let resolved = try await kernel.evaluate(#"""
-        import Foundation
-        URL.homeDirectory.deletingLastPathComponent().appendingPathComponent("outside.json").path
-        """#)
+        let outsideDeclaration = "let outside = URL(fileURLWithPath: \(String(reflecting: outside.path)))"
+        let resolved = try await kernel.evaluate("import Foundation\n" + outsideDeclaration + "\noutside.path")
         XCTAssertEqual(resolved.value, outside.path)
         do {
             _ = try await kernel.evaluate(#"""
-            let outside = URL.homeDirectory.deletingLastPathComponent().appendingPathComponent("outside.json")
             try Data("blocked".utf8).write(to: outside, options: .atomic)
             """#)
             XCTFail("Atomic write outside the project should be denied")
