@@ -66,6 +66,7 @@ struct ProjectKeychainModule: BuiltinModule {
             "kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly": .string(kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String),
             "errSecSuccess": .int(Int(errSecSuccess)),
             "errSecItemNotFound": .int(Int(errSecItemNotFound)),
+            "errSecParam": .int(Int(errSecParam)),
             "NSOSStatusErrorDomain": .string(NSOSStatusErrorDomain)
         ]
         for (name, value) in constants {

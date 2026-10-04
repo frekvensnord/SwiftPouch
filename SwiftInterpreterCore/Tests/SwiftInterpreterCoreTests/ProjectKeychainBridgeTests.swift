@@ -113,7 +113,7 @@ final class ProjectKeychainBridgeTests: XCTestCase {
         let id = ProjectID()
         let workspace = try store.workspace(for: id)
         let first = InterpreterKernel(workspace: workspace, keychainBackend: backend)
-        let saved = try await first.evaluate(declarations + #"""
+        let saved = try await first.evaluate(declarations + "\n" + #"""
         let credentials = KeychainCredentialStore()
         let initiallyEmpty = try credentials.readCredentials() == nil
         try credentials.saveCredentials(Credentials(token: "first"))
@@ -125,21 +125,21 @@ final class ProjectKeychainBridgeTests: XCTestCase {
         XCTAssertEqual(saved.value, "true|first|updated")
 
         await first.reset()
-        let afterReset = try await first.evaluate(declarations + #"""
+        let afterReset = try await first.evaluate(declarations + "\n" + #"""
         let credentials = KeychainCredentialStore()
         try credentials.readCredentials()!.token
         """#)
         XCTAssertEqual(afterReset.value, "updated")
 
         let reopened = InterpreterKernel(workspace: try store.workspace(for: id), keychainBackend: backend)
-        let afterReopen = try await reopened.evaluate(declarations + #"""
+        let afterReopen = try await reopened.evaluate(declarations + "\n" + #"""
         let credentials = KeychainCredentialStore()
         try credentials.readCredentials()!.token
         """#)
         XCTAssertEqual(afterReopen.value, "updated")
 
         let other = InterpreterKernel(workspace: try store.workspace(for: ProjectID()), keychainBackend: backend)
-        let isolated = try await other.evaluate(declarations + #"""
+        let isolated = try await other.evaluate(declarations + "\n" + #"""
         let credentials = KeychainCredentialStore()
         try credentials.readCredentials() == nil
         """#)
