@@ -100,6 +100,7 @@ public actor InterpreterKernel {
     private var interpreterDismissBridgeInstalled = false
     private var interpreterGeneration = UUID()
     private var sessionAsyncRuntime: SessionAsyncBridge?
+    private var sessionCallbackFailures: [String] = []
     private let networkSessionConfiguration: URLSessionConfiguration?
     private var publishedRevision: UInt64 = 0
     private var publishedObservers: [UUID: AsyncStream<UInt64>.Continuation] = [:]
@@ -493,6 +494,7 @@ public actor InterpreterKernel {
         let previousGeneration = interpreterGeneration
         let previousRevision = publishedRevision
         let previousAsyncRuntime = sessionAsyncRuntime
+        let previousCallbackFailures = sessionCallbackFailures
         resetInterpreterScope(invalidatePrevious: false)
         currentScenePhase = scenePhase
         let rootView: RuntimeViewNode
@@ -511,6 +513,7 @@ public actor InterpreterKernel {
             sessionAsyncRuntime?.invalidate()
             interpreter = previousInterpreter
             sessionAsyncRuntime = previousAsyncRuntime
+            sessionCallbackFailures = previousCallbackFailures
             optionalVariableTypes = previousOptionalVariableTypes
             initializedViewStateOwners = previousStateOwners
             registeredRuntimeActions = previousActions
@@ -785,6 +788,7 @@ public actor InterpreterKernel {
         interpreter = Interpreter()
         interpreter.registerOnImport("Security", module: ProjectKeychainModule(projectID: workspace.id, backend: keychainBackend))
         interpreterGeneration = UUID()
+        sessionCallbackFailures.removeAll()
         installSessionAsyncRuntime()
         let generation = interpreterGeneration
         interpreter.registerGlobal(name: "__swiftpouch_publishedChange") { [weak self] _ in
@@ -828,13 +832,15 @@ public actor InterpreterKernel {
                 try await self.invokeSessionCallback(callback)
             }
         } catch {
-            // A script callback is asynchronous: its failure cannot be thrown
-            // into the action that launched it. Keep the interpreter alive so
-            // later cancellation and network events can still be processed.
+            // Callback failures cannot be thrown into the action that started
+            // native work. Retain them for the host and runtime regressions.
+            sessionCallbackFailures.append(String(describing: error))
         }
         output.finish()
         _ = await output.readAllString()
     }
+
+    func callbackFailures() -> [String] { sessionCallbackFailures }
 
     private func invokeSessionCallback(_ callback: SessionCallback) async throws {
         switch callback {
@@ -846,13 +852,13 @@ public actor InterpreterKernel {
             let source: String
             switch method {
             case "response":
-                source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2, completionHandler: __swiftpouch_arg3)"
+                source = "__swiftpouch_delegate.__swiftpouch_urlSession_response(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2, completionHandler: __swiftpouch_arg3)"
             case "data":
-                source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2)"
+                source = "__swiftpouch_delegate.__swiftpouch_urlSession_data(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2)"
             case "complete":
-                source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, task: __swiftpouch_arg1, didCompleteWithError: __swiftpouch_arg2)"
+                source = "__swiftpouch_delegate.__swiftpouch_urlSession_complete(__swiftpouch_arg0, task: __swiftpouch_arg1, didCompleteWithError: __swiftpouch_arg2)"
             case "invalid":
-                source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, didBecomeInvalidWithError: __swiftpouch_arg1)"
+                source = "__swiftpouch_delegate.__swiftpouch_urlSession_invalid(__swiftpouch_arg0, didBecomeInvalidWithError: __swiftpouch_arg1)"
             default: return
             }
             interpreter.rootScope.bind("__swiftpouch_delegate", value: object, mutable: false)

@@ -172,6 +172,30 @@ private final class CompatibilityExpressionVisitor: SyntaxVisitor {
         super.init(viewMode: .sourceAccurate)
     }
 
+    override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard node.name.text == "urlSession" else { return .visitChildren }
+        var ancestor = node.parent
+        var insideClass = false
+        while let current = ancestor {
+            if current.is(ClassDeclSyntax.self) { insideClass = true; break }
+            ancestor = current.parent
+        }
+        guard insideClass else { return .visitChildren }
+        let labels = node.signature.parameterClause.parameters.map { $0.firstName.text }
+        let suffix: String
+        switch labels {
+        case ["_", "dataTask", "didReceive", "completionHandler"]: suffix = "response"
+        case ["_", "dataTask", "didReceive"]: suffix = "data"
+        case ["_", "task", "didCompleteWithError"]: suffix = "complete"
+        case ["_", "didBecomeInvalidWithError"]: suffix = "invalid"
+        default: return .visitChildren
+        }
+        edits.append((range: node.name.positionAfterSkippingLeadingTrivia.utf8Offset
+            ..< node.name.endPositionBeforeTrailingTrivia.utf8Offset,
+            replacement: "__swiftpouch_urlSession_\(suffix)"))
+        return .visitChildren
+    }
+
     override func visit(_ node: KeyPathExprSyntax) -> SyntaxVisitorContinueKind {
         if node.trimmedDescription == "\\.self" {
             edits.append((range: node.positionAfterSkippingLeadingTrivia.utf8Offset

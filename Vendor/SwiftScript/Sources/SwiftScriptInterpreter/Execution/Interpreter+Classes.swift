@@ -714,7 +714,8 @@ extension Interpreter {
         // Trailing-defaults rule: properties without defaults must be
         // supplied; properties with defaults may be omitted.
         for i in argSyntaxes.count..<allProps.count {
-            if allProps[i].defaultValue == nil {
+            if allProps[i].defaultValue == nil,
+               allProps[i].type?.as(OptionalTypeSyntax.self) == nil {
                 throw RuntimeError.invalid(
                     "missing argument for parameter '\(allProps[i].name)' in call"
                 )
@@ -740,16 +741,15 @@ extension Interpreter {
                 }
                 fields.append(StructField(name: prop.name, value: value))
             } else {
-                let defaultExpr = prop.defaultValue!
-                var value = try await evaluate(defaultExpr, in: scope)
-                // Coerce against the declared type so `var speed: Double = 0`
-                // stores `0.0`, not `0` — important for downstream
-                // arithmetic and string-interpolation formatting.
-                if let propType = prop.type {
-                    value = try await coerce(
-                        value: value, expr: defaultExpr,
-                        toType: propType, in: .binding
-                    )
+                var value: Value = .optional(nil)
+                if let defaultExpr = prop.defaultValue {
+                    value = try await evaluate(defaultExpr, in: scope)
+                    if let propType = prop.type {
+                        value = try await coerce(
+                            value: value, expr: defaultExpr,
+                            toType: propType, in: .binding
+                        )
+                    }
                 }
                 fields.append(StructField(name: prop.name, value: value))
             }
@@ -803,7 +803,7 @@ extension Interpreter {
                     )
                 }
             } else {
-                initial = .void
+                initial = prop.type?.as(OptionalTypeSyntax.self) == nil ? .void : .optional(nil)
             }
             fields.append(StructField(name: prop.name, value: initial))
         }

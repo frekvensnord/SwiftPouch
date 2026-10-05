@@ -65,11 +65,13 @@ private final class SessionQueue: @unchecked Sendable {
 
 private final class SessionTaskRecord: @unchecked Sendable {
     let task: URLSessionTask
+    let session: URLSession
     let callbackGate: SessionWorkItem
     private let lock = NSLock()
     private var cancelled = false
-    init(_ task: URLSessionTask, callbackGate: SessionWorkItem) {
+    init(_ task: URLSessionTask, session: URLSession, callbackGate: SessionWorkItem) {
         self.task = task
+        self.session = session
         self.callbackGate = callbackGate
     }
     var isCancelled: Bool { lock.withLock { cancelled } }
@@ -146,8 +148,9 @@ final class SessionAsyncBridge: @unchecked Sendable {
         work.attach(timer)
     }
 
-    private func track(_ task: URLSessionTask, gate: SessionWorkItem = SessionWorkItem(.void)) -> SessionTaskRecord {
-        let record = SessionTaskRecord(task, callbackGate: gate)
+    private func track(_ task: URLSessionTask, session: URLSession,
+                       gate: SessionWorkItem = SessionWorkItem(.void)) -> SessionTaskRecord {
+        let record = SessionTaskRecord(task, session: session, callbackGate: gate)
         let accepted = lock.withLock { () -> Bool in
             guard active else { return false }
             tasks[ObjectIdentifier(task)] = record
@@ -159,6 +162,12 @@ final class SessionAsyncBridge: @unchecked Sendable {
 
     private func record(for task: URLSessionTask) -> SessionTaskRecord? {
         lock.withLock { tasks[ObjectIdentifier(task)] }
+    }
+
+    private func invalidate(_ session: URLSession) {
+        let related = lock.withLock { tasks.values.filter { $0.session === session } }
+        related.forEach { $0.cancel() }
+        session.invalidateAndCancel()
     }
 
     private func makeSession(_ configuration: URLSessionConfiguration,
@@ -333,13 +342,20 @@ final class SessionAsyncBridge: @unchecked Sendable {
         interpreter.bridges["static let URLSession.shared"] = .staticComputed {
             .opaque(typeName: "URLSession", value: self.makeSession(.default))
         }
+        interpreter.bridges["func URLSession.invalidateAndCancel()"] = .method { receiver, _ in
+            guard case .opaque(_, let session as URLSession) = receiver else {
+                throw RuntimeError.invalid("URLSession.invalidateAndCancel receiver")
+            }
+            self.invalidate(session)
+            return .void
+        }
         interpreter.bridges["func URLSession.dataTask(with:)"] = .method { receiver, args in
             guard case .opaque(_, let session as URLSession) = receiver,
                   args.count == 1, case .opaque(_, let request as URLRequest) = args[0],
                   let url = request.url else { throw RuntimeError.invalid("URLSession.dataTask expects a request") }
             try await authorizeURL(url, method: request.httpMethod ?? "GET")
             let task = session.dataTask(with: request)
-            _ = self.track(task)
+            _ = self.track(task, session: session)
             return .opaque(typeName: "URLSessionDataTask", value: task)
         }
         let completionTaskBridge = Bridge.method { receiver, args in
@@ -359,7 +375,7 @@ final class SessionAsyncBridge: @unchecked Sendable {
                     .optional(error.map { .opaque(typeName: "Error", value: $0) })
                 ], gate), queue: "network-completion") }
             }
-            _ = self.track(task, gate: gate)
+            _ = self.track(task, session: session, gate: gate)
             return .opaque(typeName: "URLSessionDataTask", value: task)
         }
         interpreter.bridges["func URLSession.dataTask(with:_:)"] = completionTaskBridge
@@ -424,10 +440,25 @@ final class SessionAsyncBridge: @unchecked Sendable {
             }
         }
         interpreter.bridges["init Data(_:)"] = .`init` { args in
-            guard args.count == 1, case .opaque(_, let bytes as Data) = args[0] else {
+            guard args.count == 1 else {
+                throw RuntimeError.invalid("Data initializer expects one value")
+            }
+            switch args[0] {
+            case .opaque(_, let bytes as Data):
+                return .opaque(typeName: "Data", value: bytes)
+            case .string(let text):
+                return .opaque(typeName: "Data", value: Data(text.utf8))
+            case .array(let values):
+                let bytes = try values.map { value -> UInt8 in
+                    guard case .int(let byte) = value, (0...255).contains(byte) else {
+                        throw RuntimeError.invalid("Data initializer expects bytes")
+                    }
+                    return UInt8(byte)
+                }
+                return .opaque(typeName: "Data", value: Data(bytes))
+            default:
                 throw RuntimeError.invalid("Data initializer expects bytes")
             }
-            return .opaque(typeName: "Data", value: bytes)
         }
         interpreter.bridges["mutating func Data.removeSubrange(_:)"] = .mutatingMethod { receiver, args in
             guard case .opaque(_, let raw as Data) = receiver, args.count == 1,

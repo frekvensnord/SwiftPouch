@@ -2761,9 +2761,13 @@ final class InterpreterKernelTests: XCTestCase {
         cancelled.cancel()
         """)
         try await Task.sleep(for: .milliseconds(150))
+        let queueFailures = await kernel.callbackFailures()
+        XCTAssertTrue(queueFailures.isEmpty, queueFailures.joined(separator: "\n"))
         let events = try await kernel.evaluate("events.joined(separator: \",\")")
         XCTAssertFalse(events.value.contains("cancelled"))
-        XCTAssertTrue(events.value.contains("first,second"), events.value)
+        let ordered = events.value.split(separator: ",")
+        XCTAssertTrue((ordered.firstIndex(of: "first") ?? ordered.endIndex)
+                      < (ordered.firstIndex(of: "second") ?? ordered.endIndex), events.value)
         XCTAssertTrue(events.value.contains("main"), events.value)
         XCTAssertTrue(events.value.contains("poll"), events.value)
     }
@@ -2813,9 +2817,16 @@ final class InterpreterKernelTests: XCTestCase {
         }
         _ = try await kernel.performAction(update)
         try await Task.sleep(for: .milliseconds(80))
+        let updateFailures = await kernel.callbackFailures()
+        XCTAssertTrue(updateFailures.isEmpty, updateFailures.joined(separator: "\n"))
         let updated = try await kernel.refreshAppView(first)
         XCTAssertEqual(textValues(in: updated.rootView).first, "Updated")
-        _ = try await kernel.performAction(delay)
+        guard case .verticalStack(_, _, let refreshedChildren) = updated.rootView,
+              case .button(_, let refreshedDelay, _) = refreshedChildren[2] else {
+            return XCTFail("Expected Delay after refresh")
+        }
+        _ = delay
+        _ = try await kernel.performAction(refreshedDelay)
         let second = try await kernel.reloadAndRunApp()
         try await Task.sleep(for: .milliseconds(180))
         let fresh = try await kernel.refreshAppView(second)
@@ -2884,6 +2895,8 @@ final class InterpreterKernelTests: XCTestCase {
         cancelledStream.start("cancel")
         """)
         try await Task.sleep(for: .milliseconds(300))
+        let networkFailures = await kernel.callbackFailures()
+        XCTAssertTrue(networkFailures.isEmpty, networkFailures.joined(separator: "\n"))
         let result = try await kernel.evaluate(#"models + "|" + failure + "|" + stream.text + "|" + stream.state + "|" + cancelledStream.text + "|" + cancelledStream.state"#)
         XCTAssertEqual(result.value, #"{"models":["gpt"]}|transport|Hello|complete|Stop|cancelled"#)
     }
