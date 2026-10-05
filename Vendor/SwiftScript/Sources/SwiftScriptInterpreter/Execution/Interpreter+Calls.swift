@@ -896,9 +896,22 @@ extension Interpreter {
         in scope: Scope
     ) async throws -> Value? {
         guard call.trailingClosure == nil else { return nil }
-        guard let receiver = try readLValuePath(path, in: scope),
-              case .opaque(let opaqueType, _) = receiver
-        else { return nil }
+        guard let receiver = try readLValuePath(path, in: scope) else { return nil }
+        guard case .opaque(let opaqueType, _) = receiver else {
+            // Built-in value collections also need a writeback through a
+            // class field: `self.callbacks.append(completion)` has the same
+            // mutating semantics as a local `callbacks.append(completion)`.
+            let temporary = "__swiftpouch_mutating_receiver"
+            let local = Scope(parent: scope)
+            local.bind(temporary, value: receiver, mutable: true)
+            guard let result = try await tryMutatingMethodCall(
+                methodName: methodName, varName: temporary, call: call, in: local
+            ) else { return nil }
+            if let updated = local.lookup(temporary)?.value {
+                try await writeLValuePath(path, value: updated, in: scope)
+            }
+            return result
+        }
         let argSyntaxes = Array(call.arguments)
         let callLabels: [String?] = argSyntaxes.map { $0.label?.text }
         var found: Bridge? = bridges[

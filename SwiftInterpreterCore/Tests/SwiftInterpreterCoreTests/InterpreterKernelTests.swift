@@ -2881,6 +2881,7 @@ final class InterpreterKernelTests: XCTestCase {
                             if payload == "Stop" { task?.cancel(); state = "cancelled" }
                         }
                     }
+                    if state == "cancelled" { return }
                 }
             }
             func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
