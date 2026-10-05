@@ -2901,6 +2901,84 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(result.value, #"{"models":["gpt"]}|transport|Hello|complete|Stop|cancelled"#)
     }
 
+    func testDeviceCodePollingTokenAndModelCallbacksStayInOrder() async throws {
+        Step34URLProtocol.resetPolls()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [Step34URLProtocol.self]
+        let kernel = InterpreterKernel(workspace: try makeWorkspace(),
+                                       keychainBackend: SystemProjectKeychainBackend(),
+                                       networkSessionConfiguration: configuration)
+        _ = try await kernel.evaluate("""
+        import Foundation
+        final class LoginFlow {
+            let queue = DispatchQueue(label: "device-login")
+            let session = URLSession(configuration: .ephemeral)
+            var task: URLSessionDataTask?
+            var pollWork: DispatchWorkItem?
+            var events: [String] = []
+            func start() { queue.async { self.requestCode() } }
+            func send(_ path: String, completion: @escaping (Data?, URLResponse?, Error?) -> Void) {
+                var request = URLRequest(url: URL(string: "https://auth.openai.com/" + path)!)
+                request.httpMethod = "POST"
+                request.httpBody = Data("client".utf8)
+                task = session.dataTask(with: request) { data, response, error in
+                    self.queue.async { completion(data, response, error) }
+                }
+                task?.resume()
+            }
+            func requestCode() {
+                send("deviceauth/usercode") { data, response, error in
+                    if error != nil || data == nil { self.events.append("error"); return }
+                    self.events.append("code")
+                    self.schedulePoll()
+                }
+            }
+            func schedulePoll() {
+                let work = DispatchWorkItem { [weak self] in self?.poll() }
+                pollWork = work
+                queue.asyncAfter(deadline: .now() + 0.02, execute: work)
+            }
+            func poll() {
+                send("deviceauth/token") { data, response, error in
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    if status == 403 {
+                        self.events.append("pending")
+                        self.schedulePoll()
+                    } else if status == 200 {
+                        self.events.append("authorization")
+                        self.exchange()
+                    } else { self.events.append("error") }
+                }
+            }
+            func exchange() {
+                send("oauth/token") { data, response, error in
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    if status == 200 && data != nil && error == nil {
+                        self.events.append("token")
+                        self.loadModels()
+                    } else { self.events.append("error") }
+                }
+            }
+            func loadModels() {
+                let request = URLRequest(url: URL(string: "https://chatgpt.com/models")!)
+                URLSession.shared.dataTask(with: request) { data, response, error in
+                    self.queue.async {
+                        if data != nil && error == nil { self.events.append("models") }
+                        else { self.events.append("error") }
+                    }
+                }.resume()
+            }
+        }
+        let login = LoginFlow()
+        login.start()
+        """)
+        try await Task.sleep(for: .milliseconds(450))
+        let failures = await kernel.callbackFailures()
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+        let result = try await kernel.evaluate("login.events.joined(separator: \",\")")
+        XCTAssertEqual(result.value, "code,pending,authorization,token,models")
+    }
+
     private func textValues(in node: RuntimeViewNode) -> [String] {
         switch node {
         case .text(let value):
@@ -2926,6 +3004,8 @@ final class InterpreterKernelTests: XCTestCase {
 }
 
 private final class Step34URLProtocol: URLProtocol, @unchecked Sendable {
+    private static let pollCounter = Step34PollCounter()
+    static func resetPolls() { pollCounter.reset() }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -2934,10 +3014,15 @@ private final class Step34URLProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
             return
         }
-        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        let poll = url.path == "/deviceauth/token" ? Self.pollCounter.next() : 0
+        let status = poll == 1 ? 403 : 200
+        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         let chunks: [String]
         switch url.path {
+        case "/deviceauth/usercode": chunks = [#"{"device_auth_id":"id","user_code":"CODE"}"#]
+        case "/deviceauth/token": chunks = [status == 403 ? #"{"error":"pending"}"# : #"{"authorization_code":"token"}"#]
+        case "/oauth/token": chunks = [#"{"access_token":"access"}"#]
         case "/models": chunks = [#"{"models":["gpt"]}"#]
         case "/stream": chunks = ["data: He", "l", "\n\ndata: lo\n\ndata: [DONE]\n\n"]
         case "/cancel": chunks = ["data: Stop\n\n", "data: Later\n\n"]
@@ -2947,6 +3032,13 @@ private final class Step34URLProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+private final class Step34PollCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func reset() { lock.withLock { count = 0 } }
+    func next() -> Int { lock.withLock { count += 1; return count } }
 }
 
 final class ProjectWorkspaceTests: XCTestCase {
