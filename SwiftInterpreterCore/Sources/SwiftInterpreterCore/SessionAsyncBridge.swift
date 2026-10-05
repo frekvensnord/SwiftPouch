@@ -244,7 +244,7 @@ final class SessionAsyncBridge: @unchecked Sendable {
             }
             return .opaque(typeName: "DispatchQueue", value: SessionQueue(label))
         }
-        interpreter.bridges["func DispatchQueue.async()"] = .method { receiver, args in
+        let asyncQueueBridge = Bridge.method { receiver, args in
             guard case .opaque(_, let queue as SessionQueue) = receiver,
                   args.count == 1, case .function = args[0] else {
                 throw RuntimeError.invalid("DispatchQueue.async expects a closure")
@@ -252,6 +252,8 @@ final class SessionAsyncBridge: @unchecked Sendable {
             self.dispatch(args[0], queue: queue.name)
             return .void
         }
+        interpreter.bridges["func DispatchQueue.async(_:)" ] = asyncQueueBridge
+        interpreter.bridges["func DispatchQueue.async()"] = asyncQueueBridge
         interpreter.bridges["func DispatchQueue.asyncAfter(deadline:execute:)"] = .method { receiver, args in
             guard case .opaque(_, let queue as SessionQueue) = receiver,
                   args.count == 2, case .opaque(_, let work as SessionWorkItem) = args[1] else {
@@ -340,7 +342,7 @@ final class SessionAsyncBridge: @unchecked Sendable {
             _ = self.track(task)
             return .opaque(typeName: "URLSessionDataTask", value: task)
         }
-        interpreter.bridges["func URLSession.dataTask(with:completionHandler:)"] = .method { receiver, args in
+        let completionTaskBridge = Bridge.method { receiver, args in
             guard case .opaque(_, let session as URLSession) = receiver,
                   args.count == 2, case .opaque(_, let request as URLRequest) = args[0],
                   case .function = args[1], let url = request.url else {
@@ -360,6 +362,8 @@ final class SessionAsyncBridge: @unchecked Sendable {
             _ = self.track(task, gate: gate)
             return .opaque(typeName: "URLSessionDataTask", value: task)
         }
+        interpreter.bridges["func URLSession.dataTask(with:_:)"] = completionTaskBridge
+        interpreter.bridges["func URLSession.dataTask(with:completionHandler:)"] = completionTaskBridge
         interpreter.bridges["func URLSessionDataTask.resume()"] = .method { receiver, _ in
             guard case .opaque(_, let task as URLSessionDataTask) = receiver else { return .void }
             if self.isActive, self.record(for: task)?.isCancelled == false { task.resume() }
@@ -374,6 +378,12 @@ final class SessionAsyncBridge: @unchecked Sendable {
         }
         interpreter.bridges["static let URLSession.ResponseDisposition.allow"] = .staticValue(
             .enumValue(typeName: "URLSession.ResponseDisposition", caseName: "allow", associatedValues: []))
+        interpreter.bridges["var Error.localizedDescription: String"] = .computed { receiver in
+            guard case .opaque(_, let error as any Error) = receiver else {
+                throw RuntimeError.invalid("Error.localizedDescription receiver")
+            }
+            return .string(error.localizedDescription)
+        }
 
         // The target's SSE line buffer uses Data's Collection operations.
         // The generated Foundation table covers append/removeFirst but omits

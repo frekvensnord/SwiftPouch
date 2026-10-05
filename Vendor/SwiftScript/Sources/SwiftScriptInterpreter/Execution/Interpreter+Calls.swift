@@ -62,6 +62,8 @@ extension Interpreter {
         if let ref = call.calledExpression.as(DeclReferenceExprSyntax.self) {
             let typeName = resolveTypeName(ref.baseName.text)
             let labels: [String?] = call.arguments.map { $0.label?.text }
+                + Array(repeating: nil as String?, count:
+                    (call.trailingClosure == nil ? 0 : 1) + call.additionalTrailingClosures.count)
             let key = bridgeKey(forInit: typeName, labels: labels)
             if case .`init`(let body)? = bridges[key] {
                 var args: [Value] = []
@@ -74,6 +76,12 @@ extension Interpreter {
                         contextType: context,
                         in: scope
                     ))
+                }
+                if let trailing = call.trailingClosure {
+                    args.append(try await evaluate(closure: trailing, in: scope))
+                    for extra in call.additionalTrailingClosures {
+                        args.append(try await evaluate(closure: extra.closure, in: scope))
+                    }
                 }
                 return try await callingBridge { try await body(args) }
             }

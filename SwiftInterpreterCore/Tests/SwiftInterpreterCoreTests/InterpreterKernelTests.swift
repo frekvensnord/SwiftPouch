@@ -2813,11 +2813,13 @@ final class InterpreterKernelTests: XCTestCase {
         }
         _ = try await kernel.performAction(update)
         try await Task.sleep(for: .milliseconds(80))
-        XCTAssertEqual(textValues(in: try await kernel.refreshAppView(first)).first, "Updated")
+        let updated = try await kernel.refreshAppView(first)
+        XCTAssertEqual(textValues(in: updated.rootView).first, "Updated")
         _ = try await kernel.performAction(delay)
         let second = try await kernel.reloadAndRunApp()
         try await Task.sleep(for: .milliseconds(180))
-        XCTAssertEqual(textValues(in: try await kernel.refreshAppView(second)).first, "Fresh")
+        let fresh = try await kernel.refreshAppView(second)
+        XCTAssertEqual(textValues(in: fresh.rootView).first, "Fresh")
     }
 
     func testSessionCompletionAndFragmentedSSECallbacks() async throws {
