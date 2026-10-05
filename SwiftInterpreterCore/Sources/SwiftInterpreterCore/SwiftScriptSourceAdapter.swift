@@ -231,6 +231,24 @@ private final class CompatibilityExpressionVisitor: SyntaxVisitor {
 
     override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
         let caseName = node.declName.baseName.text
+        if node.base == nil {
+            let owner: String?
+            switch caseName {
+            case "now" where node.parent?.as(FunctionCallExprSyntax.self) != nil:
+                owner = "DispatchTime"
+            case "ephemeral", "default":
+                owner = "URLSessionConfiguration"
+            case "allow":
+                owner = "URLSession.ResponseDisposition"
+            default:
+                owner = nil
+            }
+            if let owner {
+                edits.append((range: node.positionAfterSkippingLeadingTrivia.utf8Offset
+                    ..< node.positionAfterSkippingLeadingTrivia.utf8Offset, replacement: owner))
+                return .visitChildren
+            }
+        }
         guard node.base == nil, let owner = enumCaseOwners[caseName] else { return .visitChildren }
         var ancestor = node.parent
         while let current = ancestor {

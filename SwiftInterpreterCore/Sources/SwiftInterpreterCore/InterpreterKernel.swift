@@ -1,6 +1,9 @@
 import Foundation
 import ShellKit
 import SwiftScriptInterpreter
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 private struct ActiveBindingScope: Sendable {
     var lowerBound: Int
@@ -20,6 +23,8 @@ private struct ScopedExpressionKey: Hashable {
     let bindings: [ViewConditionalBinding]
     let forEachBindings: [RuntimeForEachItemBinding]
 }
+
+private let appNetworkHosts = ["auth.openai.com", "chatgpt.com"]
 
 /// The value and console output produced by one source evaluation.
 public struct EvaluationResult: Equatable, Sendable {
@@ -94,6 +99,8 @@ public actor InterpreterKernel {
     private var interpreterScenePhase: RuntimeScenePhase?
     private var interpreterDismissBridgeInstalled = false
     private var interpreterGeneration = UUID()
+    private var sessionAsyncRuntime: SessionAsyncBridge?
+    private let networkSessionConfiguration: URLSessionConfiguration?
     private var publishedRevision: UInt64 = 0
     private var publishedObservers: [UUID: AsyncStream<UInt64>.Continuation] = [:]
     private var evaluationInProgress = false
@@ -104,10 +111,12 @@ public actor InterpreterKernel {
     }
 
     init(workspace: ProjectWorkspace, sourceAnalyzer: SourceAnalyzer = SourceAnalyzer(),
-         keychainBackend: any ProjectKeychainBackend) {
+         keychainBackend: any ProjectKeychainBackend,
+         networkSessionConfiguration: URLSessionConfiguration? = nil) {
         self.workspace = workspace
         self.sourceAnalyzer = sourceAnalyzer
         self.keychainBackend = keychainBackend
+        self.networkSessionConfiguration = networkSessionConfiguration
         self.sourceFileStore = ProjectSourceFileStore(workspace: workspace)
         self.viewExpressionLowerer = SwiftUIViewExpressionLowerer()
         self.viewConditionalSourceEditor = ViewConditionalSourceEditor()
@@ -483,7 +492,8 @@ public actor InterpreterKernel {
         let previousDismissBridgeInstalled = interpreterDismissBridgeInstalled
         let previousGeneration = interpreterGeneration
         let previousRevision = publishedRevision
-        resetInterpreterScope()
+        let previousAsyncRuntime = sessionAsyncRuntime
+        resetInterpreterScope(invalidatePrevious: false)
         currentScenePhase = scenePhase
         let rootView: RuntimeViewNode
         do {
@@ -498,7 +508,9 @@ public actor InterpreterKernel {
                 typeName: entryPoint.rootViewTypeName
             )
         } catch {
+            sessionAsyncRuntime?.invalidate()
             interpreter = previousInterpreter
+            sessionAsyncRuntime = previousAsyncRuntime
             optionalVariableTypes = previousOptionalVariableTypes
             initializedViewStateOwners = previousStateOwners
             registeredRuntimeActions = previousActions
@@ -511,6 +523,7 @@ public actor InterpreterKernel {
             publishedRevision = previousRevision
             throw error
         }
+        previousAsyncRuntime?.invalidate()
         return InterpretedAppViewSnapshot(
             sourceSnapshot: sourceSnapshot,
             entryPoint: entryPoint,
@@ -714,6 +727,7 @@ public actor InterpreterKernel {
         if resetInterpreter {
             resetInterpreterScope()
         }
+        if sessionAsyncRuntime == nil { installSessionAsyncRuntime() }
 
         let output = OutputSink()
         let projectPath = workspace.rootURL.path
@@ -723,7 +737,7 @@ public actor InterpreterKernel {
                 "HOME": projectPath,
                 "PWD": projectPath
             ]),
-            sandbox: Sandbox.rooted(at: workspace.rootURL, allowedHosts: []),
+            sandbox: Sandbox.rooted(at: workspace.rootURL, allowedHosts: appNetworkHosts),
             hostInfo: .synthetic
         )
 
@@ -766,10 +780,12 @@ public actor InterpreterKernel {
         return String(describing: value)
     }
 
-    private func resetInterpreterScope() {
+    private func resetInterpreterScope(invalidatePrevious: Bool = true) {
+        if invalidatePrevious { sessionAsyncRuntime?.invalidate() }
         interpreter = Interpreter()
         interpreter.registerOnImport("Security", module: ProjectKeychainModule(projectID: workspace.id, backend: keychainBackend))
         interpreterGeneration = UUID()
+        installSessionAsyncRuntime()
         let generation = interpreterGeneration
         interpreter.registerGlobal(name: "__swiftpouch_publishedChange") { [weak self] _ in
             await self?.publishedChange(generation: generation)
@@ -782,6 +798,65 @@ public actor InterpreterKernel {
         previousRuntimeInputs.removeAll()
         interpreterScenePhase = nil
         interpreterDismissBridgeInstalled = false
+    }
+
+    private func installSessionAsyncRuntime() {
+        let runtime = SessionAsyncBridge(generation: interpreterGeneration,
+                                         configuration: networkSessionConfiguration) { [weak self] generation, callback in
+            await self?.deliverSessionCallback(generation: generation, callback: callback)
+        }
+        interpreter.registerSessionAsyncBridge(runtime)
+        sessionAsyncRuntime = runtime
+    }
+
+    private func deliverSessionCallback(generation: UUID, callback: SessionCallback) async {
+        guard interpreterGeneration == generation else { return }
+        await acquireEvaluationSlot()
+        defer { releaseEvaluationSlot() }
+        guard interpreterGeneration == generation else { return }
+
+        let output = OutputSink()
+        let path = workspace.rootURL.path
+        let shell = Shell(
+            stdout: output,
+            environment: Environment(variables: ["HOME": path, "PWD": path]),
+            sandbox: Sandbox.rooted(at: workspace.rootURL, allowedHosts: appNetworkHosts),
+            hostInfo: .synthetic
+        )
+        do {
+            try await shell.withCurrent { @Sendable in
+                switch callback {
+                case .function(let body, let arguments, let gate):
+                    guard gate?.isCancelled != true else { return }
+                    _ = try await self.interpreter.call(body, arguments: arguments)
+                case .delegate(let object, let method, let arguments, let gate):
+                    guard gate?.isCancelled != true else { return }
+                    let source: String
+                    switch method {
+                    case "response":
+                        source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2, completionHandler: __swiftpouch_arg3)"
+                    case "data":
+                        source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2)"
+                    case "complete":
+                        source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, task: __swiftpouch_arg1, didCompleteWithError: __swiftpouch_arg2)"
+                    case "invalid":
+                        source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, didBecomeInvalidWithError: __swiftpouch_arg1)"
+                    default: return
+                    }
+                    self.interpreter.rootScope.bind("__swiftpouch_delegate", value: object, mutable: false)
+                    for (offset, value) in arguments.enumerated() {
+                        self.interpreter.rootScope.bind("__swiftpouch_arg\(offset)", value: value, mutable: false)
+                    }
+                    _ = try await self.interpreter.eval(source)
+                }
+            }
+        } catch {
+            // A script callback is asynchronous: its failure cannot be thrown
+            // into the action that launched it. Keep the interpreter alive so
+            // later cancellation and network events can still be processed.
+        }
+        output.finish()
+        _ = await output.readAllString()
     }
 
     private func updateInterpreterScenePhase(_ scenePhase: RuntimeScenePhase) async throws {
