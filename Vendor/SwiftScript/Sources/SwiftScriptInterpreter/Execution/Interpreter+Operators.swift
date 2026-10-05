@@ -273,6 +273,10 @@ extension Interpreter {
         case ("+", .double(let d)): return .double(d)
         case ("!", .bool(let b)):   return .bool(!b)
         case ("~", .int(let i)):    return .int(~i)
+        // Index-based collections in the app use `bytes[..<newline]`.
+        // Their startIndex is zero, so this partial range has the same
+        // bounds as the corresponding closed-open integer range.
+        case ("..<", .int(let upper)): return .range(lower: 0, upper: upper, closed: false)
         default:
             throw RuntimeError.invalid(
                 "unary operator '\(op)' cannot be applied to an operand of type '\(typeName(value))'"
