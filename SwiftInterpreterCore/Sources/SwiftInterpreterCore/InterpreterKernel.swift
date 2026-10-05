@@ -825,30 +825,7 @@ public actor InterpreterKernel {
         )
         do {
             try await shell.withCurrent { @Sendable in
-                switch callback {
-                case .function(let body, let arguments, let gate):
-                    guard gate?.isCancelled != true else { return }
-                    _ = try await self.interpreter.call(body, arguments: arguments)
-                case .delegate(let object, let method, let arguments, let gate):
-                    guard gate?.isCancelled != true else { return }
-                    let source: String
-                    switch method {
-                    case "response":
-                        source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2, completionHandler: __swiftpouch_arg3)"
-                    case "data":
-                        source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2)"
-                    case "complete":
-                        source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, task: __swiftpouch_arg1, didCompleteWithError: __swiftpouch_arg2)"
-                    case "invalid":
-                        source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, didBecomeInvalidWithError: __swiftpouch_arg1)"
-                    default: return
-                    }
-                    self.interpreter.rootScope.bind("__swiftpouch_delegate", value: object, mutable: false)
-                    for (offset, value) in arguments.enumerated() {
-                        self.interpreter.rootScope.bind("__swiftpouch_arg\(offset)", value: value, mutable: false)
-                    }
-                    _ = try await self.interpreter.eval(source)
-                }
+                try await self.invokeSessionCallback(callback)
             }
         } catch {
             // A script callback is asynchronous: its failure cannot be thrown
@@ -857,6 +834,33 @@ public actor InterpreterKernel {
         }
         output.finish()
         _ = await output.readAllString()
+    }
+
+    private func invokeSessionCallback(_ callback: SessionCallback) async throws {
+        switch callback {
+        case .function(let body, let arguments, let gate):
+            guard gate?.isCancelled != true else { return }
+            _ = try await interpreter.call(body, arguments: arguments)
+        case .delegate(let object, let method, let arguments, let gate):
+            guard gate?.isCancelled != true else { return }
+            let source: String
+            switch method {
+            case "response":
+                source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2, completionHandler: __swiftpouch_arg3)"
+            case "data":
+                source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, dataTask: __swiftpouch_arg1, didReceive: __swiftpouch_arg2)"
+            case "complete":
+                source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, task: __swiftpouch_arg1, didCompleteWithError: __swiftpouch_arg2)"
+            case "invalid":
+                source = "__swiftpouch_delegate.urlSession(__swiftpouch_arg0, didBecomeInvalidWithError: __swiftpouch_arg1)"
+            default: return
+            }
+            interpreter.rootScope.bind("__swiftpouch_delegate", value: object, mutable: false)
+            for (offset, value) in arguments.enumerated() {
+                interpreter.rootScope.bind("__swiftpouch_arg\(offset)", value: value, mutable: false)
+            }
+            _ = try await interpreter.eval(source)
+        }
     }
 
     private func updateInterpreterScenePhase(_ scenePhase: RuntimeScenePhase) async throws {

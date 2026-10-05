@@ -374,6 +374,64 @@ final class SessionAsyncBridge: @unchecked Sendable {
         }
         interpreter.bridges["static let URLSession.ResponseDisposition.allow"] = .staticValue(
             .enumValue(typeName: "URLSession.ResponseDisposition", caseName: "allow", associatedValues: []))
+
+        // The target's SSE line buffer uses Data's Collection operations.
+        // The generated Foundation table covers append/removeFirst but omits
+        // the index/range surface used when CRLF and frame boundaries split.
+        interpreter.bridges["var Data.startIndex: Int"] = .computed { _ in .int(0) }
+        interpreter.bridges["var Data.last: UInt8?"] = .computed { receiver in
+            guard case .opaque(_, let bytes as Data) = receiver else { return .optional(nil) }
+            return .optional(bytes.last.map { .int(Int($0)) })
+        }
+        interpreter.bridges["func Data.firstIndex(of:)"] = .method { receiver, args in
+            guard case .opaque(_, let bytes as Data) = receiver,
+                  args.count == 1, case .int(let byte) = args[0], (0...255).contains(byte) else {
+                throw RuntimeError.invalid("Data.firstIndex(of:) expects a byte")
+            }
+            return .optional(bytes.firstIndex(of: UInt8(byte)).map { .int($0) })
+        }
+        interpreter.bridges["func Data.index(after:)"] = .method { _, args in
+            guard args.count == 1, case .int(let index) = args[0] else {
+                throw RuntimeError.invalid("Data.index(after:) expects an index")
+            }
+            return .int(index + 1)
+        }
+        interpreter.bridges["subscript Data.get"] = .subscriptGet { receiver, args in
+            guard case .opaque(_, let bytes as Data) = receiver, args.count == 1 else {
+                throw RuntimeError.invalid("Data subscript expects one index or range")
+            }
+            switch args[0] {
+            case .int(let index) where bytes.indices.contains(index):
+                return .int(Int(bytes[index]))
+            case .range(let lower, let upper, let closed):
+                let end = closed ? upper + 1 : upper
+                guard lower >= 0, lower <= end, end <= bytes.count else {
+                    throw RuntimeError.invalid("Data range out of bounds")
+                }
+                return .opaque(typeName: "Data", value: Data(bytes[lower..<end]))
+            default:
+                throw RuntimeError.invalid("Data range out of bounds")
+            }
+        }
+        interpreter.bridges["init Data(_:)"] = .`init` { args in
+            guard args.count == 1, case .opaque(_, let bytes as Data) = args[0] else {
+                throw RuntimeError.invalid("Data initializer expects bytes")
+            }
+            return .opaque(typeName: "Data", value: bytes)
+        }
+        interpreter.bridges["mutating func Data.removeSubrange(_:)"] = .mutatingMethod { receiver, args in
+            guard case .opaque(_, let raw as Data) = receiver, args.count == 1,
+                  case .range(let lower, let upper, let closed) = args[0] else {
+                throw RuntimeError.invalid("Data.removeSubrange expects a range")
+            }
+            var bytes = raw
+            let end = closed ? upper + 1 : upper
+            guard lower >= 0, lower <= end, end <= bytes.count else {
+                throw RuntimeError.invalid("Data range out of bounds")
+            }
+            bytes.removeSubrange(lower..<end)
+            return (.void, .opaque(typeName: "Data", value: bytes))
+        }
     }
 
     private static func number(_ value: Value) throws -> Double {

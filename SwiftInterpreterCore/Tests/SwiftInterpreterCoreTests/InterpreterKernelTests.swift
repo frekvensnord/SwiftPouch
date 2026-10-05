@@ -2740,6 +2740,152 @@ final class InterpreterKernelTests: XCTestCase {
         }
     }
 
+    func testSessionQueuesCancelDelayedWorkAndPreserveSerialOrder() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        import Foundation
+        var events: [String] = []
+        let queue = DispatchQueue(label: "login")
+        let lock = NSLock()
+        queue.async {
+            lock.lock()
+            defer { lock.unlock() }
+            events.append("first")
+            DispatchQueue.main.async { events.append("main") }
+        }
+        queue.async { events.append("second") }
+        let cancelled = DispatchWorkItem { events.append("cancelled") }
+        let polling = DispatchWorkItem { events.append("poll") }
+        queue.asyncAfter(deadline: .now() + 0.04, execute: cancelled)
+        queue.asyncAfter(deadline: .now() + 0.04, execute: polling)
+        cancelled.cancel()
+        """)
+        try await Task.sleep(for: .milliseconds(150))
+        let events = try await kernel.evaluate("events.joined(separator: \",\")")
+        XCTAssertFalse(events.value.contains("cancelled"))
+        XCTAssertTrue(events.value.contains("first,second"), events.value)
+        XCTAssertTrue(events.value.contains("main"), events.value)
+        XCTAssertTrue(events.value.contains("poll"), events.value)
+    }
+
+    func testReloadCancelsOldWorkAndAsyncPublishedRefreshesCurrentView() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SwiftInterpreterAsyncApp-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let sourceURL = root.appendingPathComponent("AsyncApp.swift")
+        let kernel = InterpreterKernel(workspace: try ProjectWorkspaceStore(
+            rootURL: root.appendingPathComponent("Workspaces", isDirectory: true)
+        ).workspace(for: ProjectID()))
+        try Data("""
+        import Foundation
+        import SwiftUI
+        final class Store: ObservableObject {
+            @Published var title = "Fresh"
+            func update() {
+                DispatchQueue.main.async { self.title = "Updated" }
+            }
+            func delay() {
+                let work = DispatchWorkItem { self.title = "Old" }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+            }
+        }
+        @main struct AsyncApp: App {
+            var body: some Scene { WindowGroup { ContentView() } }
+        }
+        struct ContentView: View {
+            @StateObject private var store = Store()
+            var body: some View {
+                VStack {
+                    Text(store.title)
+                    Button("Update") { store.update() }
+                    Button("Delay") { store.delay() }
+                }
+            }
+        }
+        """.utf8).write(to: sourceURL)
+        _ = try await kernel.linkSourceFile(at: sourceURL)
+        let first = try await kernel.reloadAndRunApp()
+        guard case .verticalStack(_, _, let children) = first.rootView,
+              case .button(_, let update, _) = children[1],
+              case .button(_, let delay, _) = children[2] else {
+            return XCTFail("Expected the two controls")
+        }
+        _ = try await kernel.performAction(update)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(textValues(in: try await kernel.refreshAppView(first)).first, "Updated")
+        _ = try await kernel.performAction(delay)
+        let second = try await kernel.reloadAndRunApp()
+        try await Task.sleep(for: .milliseconds(180))
+        XCTAssertEqual(textValues(in: try await kernel.refreshAppView(second)).first, "Fresh")
+    }
+
+    func testSessionCompletionAndFragmentedSSECallbacks() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [Step34URLProtocol.self]
+        let kernel = InterpreterKernel(workspace: try makeWorkspace(),
+                                       keychainBackend: SystemProjectKeychainBackend(),
+                                       networkSessionConfiguration: configuration)
+        _ = try await kernel.evaluate("""
+        import Foundation
+        var models = ""
+        var failure = ""
+        let modelsRequest = URLRequest(url: URL(string: "https://chatgpt.com/models")!)
+        URLSession.shared.dataTask(with: modelsRequest) { data, response, error in
+            if let data = data { models = String(data: data, encoding: .utf8) ?? "decode" }
+        }.resume()
+        let failureRequest = URLRequest(url: URL(string: "https://auth.openai.com/failure")!)
+        URLSession.shared.dataTask(with: failureRequest) { data, response, error in
+            if error != nil { failure = "transport" }
+        }.resume()
+        final class Stream: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate {
+            var text = ""
+            var state = "waiting"
+            var lineBuffer = Data()
+            var task: URLSessionDataTask?
+            func start(_ path: String) {
+                let configuration = URLSessionConfiguration.default
+                let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+                task = session.dataTask(with: URLRequest(url: URL(string: "https://chatgpt.com/" + path)!))
+                task?.resume()
+            }
+            func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                            didReceive response: URLResponse,
+                            completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+                completionHandler(.allow)
+            }
+            func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+                lineBuffer.append(data)
+                while let newline = lineBuffer.firstIndex(of: 10) {
+                    let lineData = Data(lineBuffer[..<newline])
+                    let next = lineBuffer.index(after: newline)
+                    lineBuffer.removeSubrange(lineBuffer.startIndex..<next)
+                    if let line = String(data: lineData, encoding: .utf8), line.hasPrefix("data: ") {
+                        let payload = String(line.dropFirst(6))
+                        if payload == "[DONE]" { state = "complete" }
+                        else {
+                            text += payload
+                            if payload == "Stop" { task?.cancel(); state = "cancelled" }
+                        }
+                    }
+                }
+            }
+            func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+                if error != nil { state = "error" }
+                else if state == "waiting" { state = "incomplete" }
+            }
+            func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {}
+        }
+        let stream = Stream()
+        stream.start("stream")
+        let cancelledStream = Stream()
+        cancelledStream.start("cancel")
+        """)
+        try await Task.sleep(for: .milliseconds(300))
+        let result = try await kernel.evaluate(#"models + "|" + failure + "|" + stream.text + "|" + stream.state + "|" + cancelledStream.text + "|" + cancelledStream.state"#)
+        XCTAssertEqual(result.value, #"{"models":["gpt"]}|transport|Hello|complete|Stop|cancelled"#)
+    }
+
     private func textValues(in node: RuntimeViewNode) -> [String] {
         switch node {
         case .text(let value):
@@ -2762,6 +2908,30 @@ final class InterpreterKernelTests: XCTestCase {
         return try store.workspace(for: ProjectID())
     }
 
+}
+
+private final class Step34URLProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let url = request.url else { return }
+        if url.path == "/failure" {
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+            return
+        }
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        let chunks: [String]
+        switch url.path {
+        case "/models": chunks = [#"{"models":["gpt"]}"#]
+        case "/stream": chunks = ["data: He", "l", "\n\ndata: lo\n\ndata: [DONE]\n\n"]
+        case "/cancel": chunks = ["data: Stop\n\n", "data: Later\n\n"]
+        default: chunks = []
+        }
+        for chunk in chunks { client?.urlProtocol(self, didLoad: Data(chunk.utf8)) }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }
 
 final class ProjectWorkspaceTests: XCTestCase {
