@@ -2765,6 +2765,15 @@ final class InterpreterKernelTests: XCTestCase {
             forResource: "SwiftChatApp_Step5(1)", withExtension: "swift"
         ))
         let original = try Data(contentsOf: sourceURL)
+        let originalSource = try XCTUnwrap(String(data: original, encoding: .utf8))
+        let entry = try AppEntryPointSourceExtractor().extract(from: originalSource)
+        let extracted = try ViewBodySourceEditor().extract(
+            in: originalSource, typeName: entry.rootViewTypeName
+        )
+        _ = try CustomViewSourceExpander().expand(
+            extracted.expression, from: originalSource, rootTypeName: entry.rootViewTypeName
+        )
+        _ = try CustomViewSourceExpander().stateDeclarations(in: originalSource)
         let workspace = try makeWorkspace()
         let kernel = InterpreterKernel(workspace: workspace)
         let link = try await kernel.linkSourceFile(at: sourceURL)

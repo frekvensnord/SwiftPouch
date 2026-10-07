@@ -78,7 +78,9 @@ struct CustomViewSourceExpander: Sendable {
 
         let syntaxTree = Parser.parse(source: expression)
         guard !syntaxTree.hasError else {
-            throw RuntimeViewLoweringError.malformedSyntax
+            throw RuntimeViewLoweringError.unsupportedExpression(
+                "malformed custom view expansion in \(expansionStack.joined(separator: " -> ")): \(expression.prefix(300))"
+            )
         }
         guard syntaxTree.statements.count == 1,
               let rootExpression = syntaxTree.statements.first?.item.as(ExprSyntax.self) else {
@@ -551,7 +553,9 @@ struct CustomViewSourceExpander: Sendable {
         guard !syntaxTree.hasError,
               syntaxTree.statements.count == 1,
               let expression = syntaxTree.statements.first?.item.as(ExprSyntax.self) else {
-            throw RuntimeViewLoweringError.malformedSyntax
+            throw RuntimeViewLoweringError.unsupportedExpression(
+                "malformed custom view substitution: \(body.prefix(300))"
+            )
         }
 
         let localBindings = IdentifierPatternNameVisitor()
