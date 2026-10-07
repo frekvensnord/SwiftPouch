@@ -206,7 +206,10 @@ extension Interpreter {
                     let firstName = p.firstName.text
                     let label = (firstName == "_") ? nil : firstName
                     let internalName = (p.secondName?.text) ?? firstName
-                    return Function.Parameter(label: label, name: internalName, type: p.type)
+                    return Function.Parameter(
+                        label: label, name: internalName, type: p.type,
+                        defaultValue: p.defaultValue?.value
+                    )
                 }
                 let isRequired = initDecl.modifiers.contains {
                     $0.name.tokenKind == .keyword(.required)
@@ -615,9 +618,11 @@ extension Interpreter {
         // labels match. Walk leaf-first so child overrides parent inits.
         for cls in classDefChain(def.name) {
             for fn in cls.customInits {
-                guard fn.parameters.count == callLabels.count else { continue }
-                let paramLabels = fn.parameters.map { $0.label }
-                if zip(paramLabels, callLabels).allSatisfy({ $0 == $1 }) {
+                guard callLabels.count <= fn.parameters.count else { continue }
+                let supplied = fn.parameters.prefix(callLabels.count)
+                let omitted = fn.parameters.dropFirst(callLabels.count)
+                if zip(supplied, callLabels).allSatisfy({ $0.label == $1 })
+                    && omitted.allSatisfy({ $0.defaultValue != nil }) {
                     return try await invokeClassInit(fn, def: def, call: call, in: scope)
                 }
             }
@@ -812,6 +817,16 @@ extension Interpreter {
         let callScope = Scope(parent: capturedScope)
         callScope.bind("self", value: .classInstance(inst), mutable: true)
         for (param, value) in zip(fn.parameters, args) {
+            callScope.bind(param.name, value: value, mutable: false)
+        }
+        for param in fn.parameters.dropFirst(args.count) {
+            guard let expression = param.defaultValue else {
+                throw RuntimeError.invalid("missing argument for parameter '\(param.name)' in call")
+            }
+            var value = try await evaluate(expression, expecting: param.type, in: callScope)
+            if let type = param.type {
+                value = try await coerce(value: value, expr: expression, toType: type, in: .argument)
+            }
             callScope.bind(param.name, value: value, mutable: false)
         }
         // Push the static-context-style class context so `super.init(...)`
