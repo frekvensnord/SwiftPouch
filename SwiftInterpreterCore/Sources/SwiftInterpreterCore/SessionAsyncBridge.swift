@@ -92,6 +92,7 @@ final class SessionAsyncBridge: @unchecked Sendable {
     private let lock = NSLock()
     private var active = true
     private var workItems: [SessionWorkItem] = []
+    private var immediateTails: [String: Task<Void, Never>] = [:]
     private var tasks: [ObjectIdentifier: SessionTaskRecord] = [:]
     private var sessions: [URLSession] = []
     private let configuration: URLSessionConfiguration?
@@ -110,6 +111,7 @@ final class SessionAsyncBridge: @unchecked Sendable {
             active = false
             let result = (workItems, Array(tasks.values), sessions)
             workItems.removeAll()
+            immediateTails.removeAll()
             tasks.removeAll()
             sessions.removeAll()
             return result
@@ -132,19 +134,25 @@ final class SessionAsyncBridge: @unchecked Sendable {
     func dispatch(_ body: Value, queue: String, delay: TimeInterval = 0,
                   item: SessionWorkItem? = nil) {
         let work = item ?? SessionWorkItem(body)
-        let accepted = lock.withLock { () -> Bool in
-            guard active else { return false }
+        let timer = lock.withLock { () -> Task<Void, Never>? in
+            guard active else { return nil }
             workItems.append(work)
-            return true
-        }
-        guard accepted else { work.cancel(); return }
-        let timer = Task { [weak self] in
-            if delay > 0 {
-                try? await Task.sleep(for: .seconds(delay))
+            // Register immediate work synchronously in source order. Task
+            // scheduling alone does not guarantee two consecutive async
+            // calls reach the queue actor in their original order.
+            let predecessor = delay <= 0 ? immediateTails[queue] : nil
+            let timer = Task { [weak self] in
+                if delay > 0 {
+                    try? await Task.sleep(for: .seconds(delay))
+                }
+                await predecessor?.value
+                guard !Task.isCancelled, !work.isCancelled, let self else { return }
+                await self.enqueue(.function(work.body, [], work), queue: queue)
             }
-            guard !Task.isCancelled, !work.isCancelled, let self else { return }
-            await self.enqueue(.function(work.body, [], work), queue: queue)
+            if delay <= 0 { immediateTails[queue] = timer }
+            return timer
         }
+        guard let timer else { work.cancel(); return }
         work.attach(timer)
     }
 

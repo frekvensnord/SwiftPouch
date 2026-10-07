@@ -2760,16 +2760,20 @@ final class InterpreterKernelTests: XCTestCase {
         queue.asyncAfter(deadline: .now() + 0.04, execute: polling)
         cancelled.cancel()
         """)
-        try await Task.sleep(for: .milliseconds(150))
+        var observedEvents = ""
+        for _ in 0..<20 {
+            try await Task.sleep(for: .milliseconds(50))
+            observedEvents = try await kernel.evaluate("events.joined(separator: \",\")").value
+            if observedEvents.contains("poll") { break }
+        }
         let queueFailures = await kernel.callbackFailures()
         XCTAssertTrue(queueFailures.isEmpty, queueFailures.joined(separator: "\n"))
-        let events = try await kernel.evaluate("events.joined(separator: \",\")")
-        XCTAssertFalse(events.value.contains("cancelled"))
-        let ordered = events.value.split(separator: ",")
+        XCTAssertFalse(observedEvents.contains("cancelled"))
+        let ordered = observedEvents.split(separator: ",")
         XCTAssertTrue((ordered.firstIndex(of: "first") ?? ordered.endIndex)
-                      < (ordered.firstIndex(of: "second") ?? ordered.endIndex), events.value)
-        XCTAssertTrue(events.value.contains("main"), events.value)
-        XCTAssertTrue(events.value.contains("poll"), events.value)
+                      < (ordered.firstIndex(of: "second") ?? ordered.endIndex), observedEvents)
+        XCTAssertTrue(observedEvents.contains("main"), observedEvents)
+        XCTAssertTrue(observedEvents.contains("poll"), observedEvents)
     }
 
     func testReloadCancelsOldWorkAndAsyncPublishedRefreshesCurrentView() async throws {
@@ -2897,12 +2901,14 @@ final class InterpreterKernelTests: XCTestCase {
         stream.start("stream")
         let cancelledStream = Stream()
         cancelledStream.start("cancel")
+        let failedStream = Stream()
+        failedStream.start("failure")
         """)
         try await Task.sleep(for: .milliseconds(300))
         let networkFailures = await kernel.callbackFailures()
         XCTAssertTrue(networkFailures.isEmpty, networkFailures.joined(separator: "\n"))
-        let result = try await kernel.evaluate(#"models + "|" + failure + "|" + stream.text + "|" + stream.state + "|" + cancelledStream.text + "|" + cancelledStream.state"#)
-        XCTAssertEqual(result.value, #"{"models":["gpt"]}|transport|Hello|complete|Stop|cancelled"#)
+        let result = try await kernel.evaluate(#"models + "|" + failure + "|" + stream.text + "|" + stream.state + "|" + cancelledStream.text + "|" + cancelledStream.state + "|" + failedStream.state"#)
+        XCTAssertEqual(result.value, #"{"models":["gpt"]}|transport|Hello|complete|Stop|cancelled|error"#)
     }
 
     func testDeviceCodePollingTokenAndModelCallbacksStayInOrder() async throws {
@@ -3028,7 +3034,7 @@ private final class Step34URLProtocol: URLProtocol, @unchecked Sendable {
         case "/deviceauth/token": chunks = [status == 403 ? #"{"error":"pending"}"# : #"{"authorization_code":"token"}"#]
         case "/oauth/token": chunks = [#"{"access_token":"access"}"#]
         case "/models": chunks = [#"{"models":["gpt"]}"#]
-        case "/stream": chunks = ["data: He", "l", "\n\ndata: lo\n\ndata: [DONE]\n\n"]
+        case "/stream": chunks = ["data: He", "l\r", "\n\ndata: lo\n\ndata: [DONE]\n\n"]
         case "/cancel": chunks = ["data: Stop\n\n", "data: Later\n\n"]
         default: chunks = []
         }
