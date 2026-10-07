@@ -2740,6 +2740,29 @@ final class InterpreterKernelTests: XCTestCase {
         }
     }
 
+    func testUnmodifiedSwiftChatSourceReloadsThroughStoredFileLink() async throws {
+        let sourceURL = try XCTUnwrap(Bundle.module.url(
+            forResource: "SwiftChatApp_Step5(1)", withExtension: "swift", subdirectory: "Fixtures"
+        ))
+        let original = try Data(contentsOf: sourceURL)
+        let workspace = try makeWorkspace()
+        let kernel = InterpreterKernel(workspace: workspace)
+        let link = try await kernel.linkSourceFile(at: sourceURL)
+        XCTAssertEqual(link.fileName, sourceURL.lastPathComponent)
+
+        let first = try await kernel.reloadAndRunApp()
+        XCTAssertEqual(Data(first.sourceSnapshot.source.utf8), original)
+        XCTAssertEqual(first.entryPoint.appTypeName, "SwiftChatApp")
+
+        let reopened = InterpreterKernel(workspace: workspace)
+        let retainedLink = try await reopened.linkedSourceFile()
+        XCTAssertEqual(retainedLink, link)
+        let second = try await reopened.reloadAndRunApp()
+        XCTAssertEqual(Data(second.sourceSnapshot.source.utf8), original)
+        let linkAfterReload = try await reopened.linkedSourceFile()
+        XCTAssertEqual(linkAfterReload, link)
+    }
+
     func testSessionQueuesCancelDelayedWorkAndPreserveSerialOrder() async throws {
         let kernel = InterpreterKernel(workspace: try makeWorkspace())
         _ = try await kernel.evaluate("""

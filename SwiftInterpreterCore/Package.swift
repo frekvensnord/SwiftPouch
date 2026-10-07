@@ -53,7 +53,8 @@ let package = Package(
         ),
         .testTarget(
             name: "SwiftInterpreterCoreTests",
-            dependencies: ["SwiftInterpreterCore"]
+            dependencies: ["SwiftInterpreterCore"],
+            resources: [.copy("Fixtures/SwiftChatApp_Step5(1).swift")]
         )
     ]
 )
