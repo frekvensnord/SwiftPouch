@@ -728,6 +728,13 @@ private final class StoredPropertyReferenceVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+        // The declaration name in `.cancel` or `value.cancel` is not a
+        // reference to a stored input named `cancel`. Its base, if any,
+        // is visited separately. `self.cancel` is handled below.
+        if let member = node.parent?.as(MemberAccessExprSyntax.self),
+           member.declName.positionAfterSkippingLeadingTrivia == node.positionAfterSkippingLeadingTrivia {
+            return .visitChildren
+        }
         let rawName = node.baseName.text
         let projectedPrefix: PrefixOperatorExprSyntax?
         if let prefix = node.parent?.as(PrefixOperatorExprSyntax.self), prefix.operator.text == "$" {

@@ -2760,6 +2760,28 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(after.value, "1")
     }
 
+    func testCustomViewCallbackDoesNotReplaceMatchingEnumMember() throws {
+        let source = """
+        struct RootView: View {
+            var body: some View {
+                ActionView(cancel: { dismissAction() })
+            }
+        }
+        struct ActionView: View {
+            let cancel: () -> Void
+            var body: some View {
+                Button("Cancel", role: .cancel) { cancel() }
+            }
+        }
+        """
+        let expression = try ViewBodySourceEditor().extract(in: source, typeName: "RootView").expression
+        let expanded = try CustomViewSourceExpander().expand(
+            expression, from: source, rootTypeName: "RootView"
+        )
+        XCTAssertTrue(expanded.contains("role: .cancel"), expanded)
+        XCTAssertTrue(expanded.contains("({ dismissAction() })()"), expanded)
+    }
+
     func testUnmodifiedSwiftChatSourceReloadsThroughStoredFileLink() async throws {
         let sourceURL = try XCTUnwrap(Bundle.module.url(
             forResource: "SwiftChatApp_Step5(1)", withExtension: "swift"
