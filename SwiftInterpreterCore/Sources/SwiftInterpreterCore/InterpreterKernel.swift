@@ -1556,7 +1556,8 @@ public actor InterpreterKernel {
 
         let actionBody = action.forEachBindings.enumerated().reversed().reduce(action.source) {
             nestedSource, element in
-            "({ \(element.element.name) in\n\(nestedSource)\n})(\(forEachTemporaryName(element.offset)))"
+            let parameter = element.element.name == "$0" ? "" : "\(element.element.name) in\n"
+            return "({ \(parameter)\(nestedSource)\n})(\(forEachTemporaryName(element.offset)))"
         }
         return try await evaluateLocked(actionBody, resetInterpreter: false)
     }
@@ -1582,7 +1583,8 @@ public actor InterpreterKernel {
 
         let expressionWithItems = forEachBindings.enumerated().reversed().reduce(expression) {
             nestedExpression, element in
-            "({ \(element.element.name) in \(nestedExpression) })(\(forEachTemporaryName(element.offset)))"
+            let parameter = element.element.name == "$0" ? "" : "\(element.element.name) in "
+            return "({ \(parameter)\(nestedExpression) })(\(forEachTemporaryName(element.offset)))"
         }
         let scopedExpression = expressionWithOptionalBindings(
             expressionWithItems,

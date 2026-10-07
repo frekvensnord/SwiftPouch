@@ -180,7 +180,8 @@ struct ViewForEachSourceEditor: Sendable {
     }
 
     private func closureParameterName(_ closure: ClosureExprSyntax) -> String? {
-        guard let signature = closure.signature else { return nil }
+        // SwiftUI also accepts the ordinary implicit single closure argument.
+        guard let signature = closure.signature else { return "$0" }
         let signatureText = signature.trimmedDescription
         guard let inRange = signatureText.range(of: " in") else { return nil }
         let parameterText = signatureText[..<inRange.lowerBound]

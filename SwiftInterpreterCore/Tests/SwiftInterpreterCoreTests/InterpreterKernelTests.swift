@@ -1168,6 +1168,15 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertEqual(levelItems.map(\.content), [.text("low"), .text("high")])
         XCTAssertEqual(levelItems.map(\.id.rawValue), ["6:String3:low", "6:String4:high"])
 
+        let shorthand = try await kernel.lowerViewExpression(
+            #"ForEach(levels, id: \.self) { Text($0.capitalized) }"#
+        )
+        guard case .forEach(let shorthandItems) = shorthand else {
+            return XCTFail("Expected a shorthand-argument ForEach node")
+        }
+        XCTAssertEqual(shorthandItems.map(\.content), [.text("Low"), .text("High")])
+        XCTAssertEqual(shorthandItems.map(\.id.rawValue), levelItems.map(\.id.rawValue))
+
         let numbers = try await kernel.lowerViewExpression(
             #"ForEach(2..<5, id: \.self) { index in Text(index) }"#
         )
