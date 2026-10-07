@@ -79,7 +79,7 @@ struct CustomViewSourceExpander: Sendable {
         let syntaxTree = Parser.parse(source: expression)
         guard !syntaxTree.hasError else {
             throw RuntimeViewLoweringError.unsupportedExpression(
-                "malformed custom view expansion in \(expansionStack.joined(separator: " -> ")): \(expression.prefix(300))"
+                "malformed custom view expansion in \(expansionStack.joined(separator: " -> ")): \(expression)"
             )
         }
         guard syntaxTree.statements.count == 1,
