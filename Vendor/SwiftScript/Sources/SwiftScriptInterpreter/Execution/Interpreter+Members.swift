@@ -282,8 +282,16 @@ extension Interpreter {
                 return result
             }
         case .classInstance(let inst):
-            if let f = inst.fields.first(where: { $0.name == name }) {
-                return f.value
+            if let index = inst.fields.firstIndex(where: { $0.name == name }) {
+                if case .void = inst.fields[index].value,
+                   let expression = classDefChain(inst.typeName)
+                       .compactMap({ $0.lazyProperties[name] }).first {
+                    let lazyScope = Scope(parent: rootScope)
+                    lazyScope.bind("self", value: .classInstance(inst), mutable: true)
+                    let value = try await evaluate(expression, in: lazyScope)
+                    inst.fields[index].value = value
+                }
+                return inst.fields[index].value
             }
             // Computed property: walk the inheritance chain to find a
             // getter, then invoke it with `self` bound to this instance.

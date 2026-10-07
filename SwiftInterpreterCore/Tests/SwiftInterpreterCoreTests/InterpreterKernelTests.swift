@@ -2740,6 +2740,26 @@ final class InterpreterKernelTests: XCTestCase {
         }
     }
 
+    func testClassLazyPropertyUsesCompletedSelfAndRunsOnlyOnce() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("""
+        final class Counter {
+            var calls = 0
+            lazy var value = self.compute()
+            func compute() -> Int { calls += 1; return calls * 2 }
+        }
+        let counter = Counter()
+        """)
+        let before = try await kernel.evaluate("counter.calls")
+        XCTAssertEqual(before.value, "0")
+        let first = try await kernel.evaluate("counter.value")
+        XCTAssertEqual(first.value, "2")
+        let second = try await kernel.evaluate("counter.value")
+        XCTAssertEqual(second.value, "2")
+        let after = try await kernel.evaluate("counter.calls")
+        XCTAssertEqual(after.value, "1")
+    }
+
     func testUnmodifiedSwiftChatSourceReloadsThroughStoredFileLink() async throws {
         let sourceURL = try XCTUnwrap(Bundle.module.url(
             forResource: "SwiftChatApp_Step5(1)", withExtension: "swift"

@@ -74,6 +74,7 @@ extension Interpreter {
         }
 
         var properties: [StructDef.Property] = []
+        var lazyProperties: [String: ExprSyntax] = [:]
         var methods: [String: Function] = [:]
         var computed: [String: Function] = [:]
         var customInits: [Function] = []
@@ -104,6 +105,9 @@ extension Interpreter {
                 }
                 let isOverride = varDecl.modifiers.contains {
                     $0.name.tokenKind == .keyword(.override)
+                }
+                let isLazy = varDecl.modifiers.contains {
+                    $0.name.tokenKind == .keyword(.lazy)
                 }
                 for binding in varDecl.bindings {
                     guard let ident = binding.pattern.as(IdentifierPatternSyntax.self) else {
@@ -193,10 +197,13 @@ extension Interpreter {
                         if let propType = binding.typeAnnotation?.type {
                             try validateType(propType)
                         }
+                        if isLazy, let initializer = binding.initializer?.value {
+                            lazyProperties[propName] = initializer
+                        }
                         properties.append(StructDef.Property(
                             name: propName,
                             type: binding.typeAnnotation?.type,
-                            defaultValue: binding.initializer?.value
+                            defaultValue: isLazy ? nil : binding.initializer?.value
                         ))
                     }
                 }
@@ -350,6 +357,7 @@ extension Interpreter {
             superclass: superclassName,
             bridgedParent: bridgedParent,
             properties: properties,
+            lazyProperties: lazyProperties,
             methods: methods,
             computedProperties: computed,
             customInits: customInits,
@@ -726,7 +734,8 @@ extension Interpreter {
         // supplied; properties with defaults may be omitted.
         for i in argSyntaxes.count..<allProps.count {
             if allProps[i].defaultValue == nil,
-               allProps[i].type?.as(OptionalTypeSyntax.self) == nil {
+               allProps[i].type?.as(OptionalTypeSyntax.self) == nil,
+               !classDefChain(def.name).contains(where: { $0.lazyProperties[allProps[i].name] != nil }) {
                 throw RuntimeError.invalid(
                     "missing argument for parameter '\(allProps[i].name)' in call"
                 )
@@ -752,7 +761,8 @@ extension Interpreter {
                 }
                 fields.append(StructField(name: prop.name, value: value))
             } else {
-                var value: Value = .optional(nil)
+                var value: Value = prop.type?.as(OptionalTypeSyntax.self) == nil
+                    ? .void : .optional(nil)
                 if let defaultExpr = prop.defaultValue {
                     value = try await evaluate(defaultExpr, in: scope)
                     if let propType = prop.type {

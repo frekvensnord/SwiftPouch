@@ -365,6 +365,9 @@ public struct ClassDef {
     /// script doesn't override.
     public let bridgedParent: String?
     public var properties: [StructDef.Property]
+    /// Stored `lazy var` initializers, evaluated once on first read with
+    /// `self` bound to the completed class instance.
+    public var lazyProperties: [String: ExprSyntax] = [:]
     public var methods: [String: Function] = [:]
     public var computedProperties: [String: Function] = [:]
     public var customInits: [Function] = []
