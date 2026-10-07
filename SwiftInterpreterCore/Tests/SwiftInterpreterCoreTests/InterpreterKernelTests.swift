@@ -2742,7 +2742,7 @@ final class InterpreterKernelTests: XCTestCase {
 
     func testUnmodifiedSwiftChatSourceReloadsThroughStoredFileLink() async throws {
         let sourceURL = try XCTUnwrap(Bundle.module.url(
-            forResource: "SwiftChatApp_Step5(1)", withExtension: "swift", subdirectory: "Fixtures"
+            forResource: "SwiftChatApp_Step5(1)", withExtension: "swift"
         ))
         let original = try Data(contentsOf: sourceURL)
         let workspace = try makeWorkspace()
