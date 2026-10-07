@@ -619,10 +619,16 @@ extension Interpreter {
         for cls in classDefChain(def.name) {
             for fn in cls.customInits {
                 guard callLabels.count <= fn.parameters.count else { continue }
-                let supplied = fn.parameters.prefix(callLabels.count)
-                let omitted = fn.parameters.dropFirst(callLabels.count)
-                if zip(supplied, callLabels).allSatisfy({ $0.label == $1 })
-                    && omitted.allSatisfy({ $0.defaultValue != nil }) {
+                var nextArgument = 0
+                let matches = fn.parameters.allSatisfy { parameter in
+                    if nextArgument < callLabels.count,
+                       callLabels[nextArgument] == parameter.label {
+                        nextArgument += 1
+                        return true
+                    }
+                    return parameter.defaultValue != nil
+                }
+                if matches && nextArgument == callLabels.count {
                     return try await invokeClassInit(fn, def: def, call: call, in: scope)
                 }
             }
@@ -778,20 +784,6 @@ extension Interpreter {
             throw RuntimeError.invalid("init must be a user-defined function")
         }
         let argSyntaxes = Array(call.arguments)
-        var args: [Value] = []
-        for (i, argSyntax) in argSyntaxes.enumerated() {
-            let paramType = (i < fn.parameters.count) ? fn.parameters[i].type : nil
-            var value = try await evaluate(
-                argSyntax.expression, expecting: paramType, in: scope
-            )
-            if let pt = paramType {
-                value = try await coerce(
-                    value: value, expr: argSyntax.expression,
-                    toType: pt, in: .argument
-                )
-            }
-            args.append(value)
-        }
 
         // Pre-seed self with chain-collected stored properties, each set
         // to its default (or .void if none). The init body fills in any
@@ -816,14 +808,22 @@ extension Interpreter {
 
         let callScope = Scope(parent: capturedScope)
         callScope.bind("self", value: .classInstance(inst), mutable: true)
-        for (param, value) in zip(fn.parameters, args) {
-            callScope.bind(param.name, value: value, mutable: false)
-        }
-        for param in fn.parameters.dropFirst(args.count) {
-            guard let expression = param.defaultValue else {
+        var nextArgument = 0
+        for param in fn.parameters {
+            let expression: ExprSyntax
+            let evaluationScope: Scope
+            if nextArgument < argSyntaxes.count,
+               argSyntaxes[nextArgument].label?.text == param.label {
+                expression = argSyntaxes[nextArgument].expression
+                evaluationScope = scope
+                nextArgument += 1
+            } else if let fallback = param.defaultValue {
+                expression = fallback
+                evaluationScope = callScope
+            } else {
                 throw RuntimeError.invalid("missing argument for parameter '\(param.name)' in call")
             }
-            var value = try await evaluate(expression, expecting: param.type, in: callScope)
+            var value = try await evaluate(expression, expecting: param.type, in: evaluationScope)
             if let type = param.type {
                 value = try await coerce(value: value, expr: expression, toType: type, in: .argument)
             }
