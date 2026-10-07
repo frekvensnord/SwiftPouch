@@ -37,6 +37,12 @@ struct AppSourceBootstrapper: Sendable {
                 declarations.append(variable.trimmedDescription)
             }
         }
+        // Foundation's TimeInterval is a public alias for Double. The
+        // interpreter resolves script-declared aliases, while importing its
+        // Foundation bridge does not yet import the module's typealiases.
+        if let foundation = declarations.firstIndex(of: "import Foundation") {
+            declarations.insert("typealias TimeInterval = Double", at: foundation + 1)
+        }
         let objects = try objectInitializers(in: source, typeName: rootTypeName,
                                              declarations: root.objectDeclarations)
         return (declarations + objects).joined(separator: "\n\n")
