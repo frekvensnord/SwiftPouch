@@ -287,7 +287,8 @@ extension Interpreter {
         }
         // Properties not supplied by the caller must have a default.
         for i in argSyntaxes.count..<def.properties.count {
-            if def.properties[i].defaultValue == nil {
+            if def.properties[i].defaultValue == nil,
+               def.properties[i].type?.as(OptionalTypeSyntax.self) == nil {
                 throw RuntimeError.invalid(
                     "missing argument for parameter '\(def.properties[i].name)' in call"
                 )
@@ -321,8 +322,14 @@ extension Interpreter {
                 }
                 fields.append(StructField(name: prop.name, value: value))
             } else {
-                // Trailing default.
-                let value = try await evaluate(prop.defaultValue!, in: scope)
+                // Swift synthesizes nil for an optional stored property
+                // without an explicit initializer (e.g. ChatState()).
+                let value: Value
+                if let expression = prop.defaultValue {
+                    value = try await evaluate(expression, in: scope)
+                } else {
+                    value = .optional(nil)
+                }
                 fields.append(StructField(name: prop.name, value: value))
             }
         }
