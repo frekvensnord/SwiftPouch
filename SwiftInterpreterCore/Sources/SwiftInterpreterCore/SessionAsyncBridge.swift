@@ -349,6 +349,13 @@ final class SessionAsyncBridge: @unchecked Sendable {
             self.invalidate(session)
             return .void
         }
+        interpreter.bridges["func URLSession.finishTasksAndInvalidate()"] = .method { receiver, _ in
+            guard case .opaque(_, let session as URLSession) = receiver else {
+                throw RuntimeError.invalid("URLSession.finishTasksAndInvalidate receiver")
+            }
+            session.finishTasksAndInvalidate()
+            return .void
+        }
         interpreter.bridges["func URLSession.dataTask(with:)"] = .method { receiver, args in
             guard case .opaque(_, let session as URLSession) = receiver,
                   args.count == 1, case .opaque(_, let request as URLRequest) = args[0],
@@ -472,6 +479,16 @@ final class SessionAsyncBridge: @unchecked Sendable {
             }
             bytes.removeSubrange(lower..<end)
             return (.void, .opaque(typeName: "Data", value: bytes))
+        }
+        // The generated Foundation no-argument overload mistakenly expects
+        // an integer. SSE's CRLF handling calls this exact method.
+        interpreter.bridges["mutating func Data.removeLast()"] = .mutatingMethod { receiver, args in
+            guard case .opaque(_, let raw as Data) = receiver, args.isEmpty, !raw.isEmpty else {
+                throw RuntimeError.invalid("Data.removeLast expects nonempty data" )
+            }
+            var bytes = raw
+            let removed = bytes.removeLast()
+            return (.int(Int(removed)), .opaque(typeName: "Data", value: bytes))
         }
     }
 

@@ -2871,9 +2871,11 @@ final class InterpreterKernelTests: XCTestCase {
                 lineBuffer.append(data)
                 while let newline = lineBuffer.firstIndex(of: 10) {
                     let lineData = Data(lineBuffer[..<newline])
+                    var normalized = lineData
+                    if normalized.last == 13 { normalized.removeLast() }
                     let next = lineBuffer.index(after: newline)
                     lineBuffer.removeSubrange(lineBuffer.startIndex..<next)
-                    if let line = String(data: lineData, encoding: .utf8), line.hasPrefix("data: ") {
+                    if let line = String(data: normalized, encoding: .utf8), line.hasPrefix("data: ") {
                         let payload = String(line.dropFirst(6))
                         if payload == "[DONE]" { state = "complete" }
                         else {
@@ -2887,6 +2889,7 @@ final class InterpreterKernelTests: XCTestCase {
             func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
                 if error != nil { state = "error" }
                 else if state == "waiting" { state = "incomplete" }
+                session.finishTasksAndInvalidate()
             }
             func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {}
         }

@@ -67,6 +67,39 @@ extension Interpreter {
         {
             let baseState = try await evaluateAsChain(base, in: scope)
             guard case .alive(let baseVal) = baseState else { return .dead }
+            // An optional class reference still dispatches its own methods.
+            // The generic invokeMethod path only sees bridged/builtin methods;
+            // `self?.poll()` in a captured work item must reach the class def.
+            if case .classInstance(let instance) = baseVal,
+               let definition = classDefs[instance.typeName],
+               let (method, owner) = lookupClassMethod(
+                   on: definition, mAccess.declName.baseName.text
+               ) {
+                var args: [Value] = []
+                for (index, argument) in call.arguments.enumerated() {
+                    let parameterType = index < method.parameters.count
+                        ? method.parameters[index].type : nil
+                    var value = try await evaluate(
+                        argument.expression, expecting: parameterType, in: scope
+                    )
+                    if let parameterType {
+                        value = try await coerce(
+                            value: value, expr: argument.expression,
+                            toType: parameterType, in: .argument
+                        )
+                    }
+                    args.append(value)
+                }
+                if let trailing = call.trailingClosure {
+                    args.append(try await evaluate(closure: trailing, in: scope))
+                    for extra in call.additionalTrailingClosures {
+                        args.append(try await evaluate(closure: extra.closure, in: scope))
+                    }
+                }
+                return absorb(try await invokeClassMethod(
+                    method, on: instance, def: owner, args: args
+                ))
+            }
             let args = try await call.arguments.asyncMap { try await evaluate($0.expression, in: scope) }
             let result = try await invokeMethod(
                 mAccess.declName.baseName.text,
