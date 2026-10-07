@@ -1068,6 +1068,16 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
                 throw RuntimeViewLoweringError.unsupportedArgument(name)
             }
             modifier = .lineLimit(try lineLimit(argument.expression))
+        case "fixedSize":
+            let arguments = Array(call.arguments)
+            guard arguments.count == 2,
+                  arguments[0].label?.text == "horizontal",
+                  arguments[1].label?.text == "vertical",
+                  let horizontal = staticBoolean(arguments[0].expression),
+                  let vertical = staticBoolean(arguments[1].expression) else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            modifier = .fixedSize(horizontal: horizontal, vertical: vertical)
         case "multilineTextAlignment":
             guard call.arguments.count == 1,
                   let argument = call.arguments.first,

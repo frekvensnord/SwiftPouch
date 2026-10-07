@@ -2791,6 +2791,17 @@ final class InterpreterKernelTests: XCTestCase {
         XCTAssertTrue(expanded.contains("({ dismissAction() })()"), expanded)
     }
 
+    func testOriginalNoticeBannerFixedSizeIsRendered() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let view = try await kernel.lowerViewExpression(
+            "Text(\"Notice\").fixedSize(horizontal: false, vertical: true)"
+        )
+        XCTAssertEqual(view, .modified(
+            content: .text("Notice"),
+            modifier: .fixedSize(horizontal: false, vertical: true)
+        ))
+    }
+
     func testUnmodifiedSwiftChatSourceReloadsThroughStoredFileLink() async throws {
         let sourceURL = try XCTUnwrap(Bundle.module.url(
             forResource: "SwiftChatApp_Step5(1)", withExtension: "swift"
