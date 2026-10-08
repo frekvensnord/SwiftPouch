@@ -278,6 +278,8 @@ public enum RuntimeViewModifier: Codable, Equatable, Sendable {
     case font(RuntimeFont)
     case lineLimit(RuntimeLineLimit)
     case fixedSize(horizontal: Bool, vertical: Bool)
+    case buttonStyleBorderless
+    case controlSizeSmall
     case multilineTextAlignment(RuntimeHorizontalAlignment)
     case accessibilityLabel(String)
     case disabled(Bool)
@@ -733,6 +735,10 @@ public struct SwiftUIRuntimeRenderer: View {
             render(content).lineLimit(minimum...maximum)
         case .fixedSize(let horizontal, let vertical):
             render(content).fixedSize(horizontal: horizontal, vertical: vertical)
+        case .buttonStyleBorderless:
+            render(content).buttonStyle(.borderless)
+        case .controlSizeSmall:
+            render(content).controlSize(.small)
         case .multilineTextAlignment(let alignment):
             render(content).multilineTextAlignment(textAlignment(alignment))
         case .accessibilityLabel(let label):

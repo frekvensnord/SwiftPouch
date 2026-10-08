@@ -2800,6 +2800,20 @@ final class InterpreterKernelTests: XCTestCase {
             content: .text("Notice"),
             modifier: .fixedSize(horizontal: false, vertical: true)
         ))
+
+        let retry = try await kernel.lowerViewExpression(
+            "Button(\"Retry\") {}.buttonStyle(.borderless)"
+        )
+        guard case .modified(_, .buttonStyleBorderless) = retry else {
+            return XCTFail("Expected the original retry button style")
+        }
+
+        let progress = try await kernel.lowerViewExpression(
+            "ProgressView().controlSize(.small)"
+        )
+        guard case .modified(_, .controlSizeSmall) = progress else {
+            return XCTFail("Expected the original streaming progress size")
+        }
     }
 
     func testUnmodifiedSwiftChatSourceReloadsThroughStoredFileLink() async throws {

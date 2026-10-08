@@ -1078,6 +1078,20 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
                 throw RuntimeViewLoweringError.unsupportedArgument(name)
             }
             modifier = .fixedSize(horizontal: horizontal, vertical: vertical)
+        case "buttonStyle":
+            guard call.arguments.count == 1,
+                  call.arguments.first?.label == nil,
+                  call.arguments.first.flatMap({ staticMemberName($0.expression) }) == "borderless" else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            modifier = .buttonStyleBorderless
+        case "controlSize":
+            guard call.arguments.count == 1,
+                  call.arguments.first?.label == nil,
+                  call.arguments.first.flatMap({ staticMemberName($0.expression) }) == "small" else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            modifier = .controlSizeSmall
         case "multilineTextAlignment":
             guard call.arguments.count == 1,
                   let argument = call.arguments.first,
