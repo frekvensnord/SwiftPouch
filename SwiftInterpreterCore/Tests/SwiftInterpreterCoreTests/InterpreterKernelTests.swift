@@ -2831,6 +2831,36 @@ final class InterpreterKernelTests: XCTestCase {
         ))
     }
 
+    func testMessageBackgroundBuilderRendersAsSwiftUIBackground() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        let node = try await kernel.lowerViewExpression(
+            "Text(\"Message\").background { Color.secondary }"
+        )
+        XCTAssertEqual(node, .modified(
+            content: .text("Message"),
+            modifier: .backgroundView(.color(RuntimeColorValue(style: .secondary)))
+        ))
+    }
+
+    func testMessageFrameAlignmentFollowsCurrentInterpreterValue() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var isUser = true")
+        let source = "Text(\"Message\").frame(maxWidth: 650, alignment: isUser ? .trailing : .leading)"
+        let first = try await kernel.lowerViewExpression(source)
+        XCTAssertEqual(first, .modified(
+            content: .text("Message"),
+            modifier: .frame(width: nil, height: nil, maxWidth: .value(650),
+                             maxHeight: nil, alignment: .trailing)
+        ))
+        _ = try await kernel.evaluate("isUser = false")
+        let second = try await kernel.lowerViewExpression(source)
+        XCTAssertEqual(second, .modified(
+            content: .text("Message"),
+            modifier: .frame(width: nil, height: nil, maxWidth: .value(650),
+                             maxHeight: nil, alignment: .leading)
+        ))
+    }
+
     func testUnmodifiedSwiftChatSourceReloadsThroughStoredFileLink() async throws {
         let sourceURL = try XCTUnwrap(Bundle.module.url(
             forResource: "SwiftChatApp_Step5(1)", withExtension: "swift"

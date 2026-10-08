@@ -866,6 +866,15 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
         if name == "overlay" {
             return try overlayModifier(call, content: content)
         }
+        if name == "background", let closure = call.trailingClosure {
+            guard call.arguments.isEmpty, call.additionalTrailingClosures.isEmpty else {
+                throw RuntimeViewLoweringError.unsupportedArgument(name)
+            }
+            return .modified(
+                content: content,
+                modifier: .backgroundView(try lowerViewBuilderStatements(closure.statements))
+            )
+        }
         if name == "onSubmit" {
             guard call.arguments.isEmpty, call.additionalTrailingClosures.isEmpty,
                   let closure = call.trailingClosure else {
@@ -1370,11 +1379,27 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             case "maxHeight":
                 maxHeight = try frameDimension(argument.expression, viewName: name)
             case "alignment":
-                guard let value = staticMemberName(argument.expression),
-                      let parsed = RuntimeFrameAlignment(rawValue: value) else {
-                    throw RuntimeViewLoweringError.unsupportedArgument(name)
+                if let ternary = argument.expression.as(TernaryExprSyntax.self) {
+                    guard let trueName = staticMemberName(ternary.thenExpression),
+                          let falseName = staticMemberName(ternary.elseExpression),
+                          let onTrue = RuntimeFrameAlignment(rawValue: trueName),
+                          let onFalse = RuntimeFrameAlignment(rawValue: falseName) else {
+                        throw RuntimeViewLoweringError.unsupportedArgument(name)
+                    }
+                    let offset = ternary.condition.positionAfterSkippingLeadingTrivia.utf8Offset
+                    guard let selected = staticBoolean(ternary.condition)
+                        ?? resolvedDynamicBooleanSites[offset]
+                        ?? resolvedDynamicBooleans[ternary.condition.trimmedDescription] else {
+                        throw RuntimeViewLoweringError.unsupportedArgument(name)
+                    }
+                    alignment = selected ? onTrue : onFalse
+                } else {
+                    guard let value = staticMemberName(argument.expression),
+                          let parsed = RuntimeFrameAlignment(rawValue: value) else {
+                        throw RuntimeViewLoweringError.unsupportedArgument(name)
+                    }
+                    alignment = parsed
                 }
-                alignment = parsed
             default:
                 throw RuntimeViewLoweringError.unsupportedArgument(name)
             }
@@ -1793,10 +1818,21 @@ private final class DynamicBooleanModifierExpressionVisitor: SyntaxVisitor {
             return .skipChildren
         }
         guard let memberAccess = node.calledExpression.as(MemberAccessExprSyntax.self),
-              let argument = node.arguments.first,
-              argument.label == nil,
               node.trailingClosure == nil,
               node.additionalTrailingClosures.isEmpty else {
+            return .visitChildren
+        }
+        if memberAccess.declName.baseName.text == "frame",
+           let alignment = node.arguments.first(where: { $0.label?.text == "alignment" }),
+           let ternary = alignment.expression.as(TernaryExprSyntax.self),
+           ternary.condition.as(BooleanLiteralExprSyntax.self) == nil {
+            sites.append(DynamicViewExpressionSite(
+                expression: ternary.condition.trimmedDescription,
+                utf8Offset: ternary.condition.positionAfterSkippingLeadingTrivia.utf8Offset
+            ))
+            return .visitChildren
+        }
+        guard let argument = node.arguments.first, argument.label == nil else {
             return .visitChildren
         }
 

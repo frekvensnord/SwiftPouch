@@ -284,6 +284,7 @@ public enum RuntimeViewModifier: Codable, Equatable, Sendable {
     case accessibilityLabel(String)
     case disabled(Bool)
     case background(style: RuntimeBackgroundStyle, shape: RuntimeShape?)
+    case backgroundView(RuntimeViewNode)
     case overlay(alignment: RuntimeFrameAlignment, overlay: RuntimeViewNode)
     case contentShape(RuntimeShape)
     case tag(String)
@@ -747,6 +748,8 @@ public struct SwiftUIRuntimeRenderer: View {
             render(content).disabled(isDisabled)
         case .background(let style, let shape):
             renderBackground(content, style: style, shape: shape)
+        case .backgroundView(let background):
+            render(content).background { render(background) }
         case .overlay(let alignment, let overlay):
             render(content).overlay(alignment: frameAlignment(alignment)) {
                 render(overlay)
