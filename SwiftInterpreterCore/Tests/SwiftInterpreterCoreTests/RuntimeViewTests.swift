@@ -511,7 +511,13 @@ final class RuntimeViewTests: XCTestCase {
         XCTAssertThrowsError(try lowerer.lower("Text(\"x\").padding(isCompact ? 4 : 8)"))
         XCTAssertThrowsError(try lowerer.lower("Text(\"x\").disabled(isSending)"))
         XCTAssertThrowsError(try lowerer.lower("Text(\"x\").background(isSelected ? Color.red : Color.blue)"))
-        XCTAssertThrowsError(try lowerer.lower("Text(\"x\").background { RoundedRectangle(cornerRadius: 8) }"))
+        XCTAssertEqual(
+            try lowerer.lower("Text(\"x\").background { RoundedRectangle(cornerRadius: 8) }"),
+            .modified(
+                content: .text("x"),
+                modifier: .backgroundView(.shape(.roundedRectangle(cornerRadius: 8, style: .circular)))
+            )
+        )
         XCTAssertThrowsError(try lowerer.lower("Text(\"x\").contentShape(shape)"))
         XCTAssertThrowsError(try lowerer.lower("Text(\"x\").overlay(alignment: .leading) { if isLoading { Text(\"wait\") } }"))
         XCTAssertEqual(
