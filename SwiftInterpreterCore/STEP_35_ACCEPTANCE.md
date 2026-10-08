@@ -14,8 +14,9 @@ evidence, not an assertion that device acceptance has already passed.
 - The host persists a project-specific bookmark in `ProjectSourceFileStore`.
   The exact-source Core test links the resource, invokes `reloadAndRunApp()`,
   reopens the same workspace in a new kernel, and reloads from the existing
-  bookmark without calling `linkSourceFile` again. Passing this test will
-  establish the Core link/reload path, not the iOS Files-provider behavior.
+  bookmark without calling `linkSourceFile` again. This test passed in
+  CI #112 and establishes the Core link/reload path, not the iOS Files-provider
+  behavior.
 - The pre-existing saved bookmark **on an iPhone** is not available to this
   CI runner or Linux workspace. Its identity and continued access must be
   checked in the installed host on the device.
@@ -40,6 +41,24 @@ Both `SwiftInterpreterCore/Package.resolved` and the host workspace's
 | swift-argument-parser | `6a52f3251125d74daf04fcbd5e6f08a75d074382` | 1.8.2 |
 | swift-subprocess | `11633673a41f509f8945f23c96c7acd4adafd679` | 0.5.0 |
 | swift-system | `869129b7bf4ecc57b97d0193ad29690ca2134750` | 1.8.1 |
+
+## Automated result on this branch
+
+- Code commit `099f624d292c0adb5a002fef06d65f70a677a09e`:
+  [CI #112](https://github.com/frekvensnord/SwiftPouch/actions/runs/37833688267)
+  completed successfully on the Xcode 27 runner.
+- Core: **134/134 tests passed**. The original-file test passed after
+  linking the byte-identical resource, building its root UI, constructing a
+  second kernel for the same workspace, and reloading again without file
+  re-selection. The Core suite also exercises queue ordering, login/model
+  callbacks, fragmented SSE, cancellation, stale-session isolation, project
+  persistence and Keychain bridges with controlled dependencies. Those tests
+  do not constitute the original app's real device/network end-to-end run.
+- Host: unsigned generic iOS device-SDK build **succeeded** with Xcode 27.0
+  (27A266a) and Apple Swift 6.4 (swiftlang-6.4.0.34.1). This build is not a
+  signed installation or interactive device test.
+- No device observation, device iOS build number, host signing identity,
+  live account login, or real response-stream result is available here.
 
 ## Physical-device acceptance record
 
