@@ -2816,6 +2816,21 @@ final class InterpreterKernelTests: XCTestCase {
         }
     }
 
+    func testMessagePaddingFollowsCurrentInterpreterValue() async throws {
+        let kernel = InterpreterKernel(workspace: try makeWorkspace())
+        _ = try await kernel.evaluate("var isUser = true")
+        let source = "Text(\"Message\").padding(isUser ? 12 : 0)"
+        let first = try await kernel.lowerViewExpression(source)
+        XCTAssertEqual(first, .modified(
+            content: .text("Message"), modifier: .padding(edges: .all, length: 12)
+        ))
+        _ = try await kernel.evaluate("isUser = false")
+        let second = try await kernel.lowerViewExpression(source)
+        XCTAssertEqual(second, .modified(
+            content: .text("Message"), modifier: .padding(edges: .all, length: 0)
+        ))
+    }
+
     func testUnmodifiedSwiftChatSourceReloadsThroughStoredFileLink() async throws {
         let sourceURL = try XCTUnwrap(Bundle.module.url(
             forResource: "SwiftChatApp_Step5(1)", withExtension: "swift"

@@ -1321,6 +1321,19 @@ public struct SwiftUIViewExpressionLowerer: Sendable {
             if let edges = paddingEdges(first) {
                 return .padding(edges: edges, length: nil)
             }
+            if let ternary = first.as(TernaryExprSyntax.self) {
+                // The target message row chooses its padding from the
+                // current element's role; validate both numeric branches.
+                let whenTrue = try optionalNumber(ternary.thenExpression, viewName: name)
+                let whenFalse = try optionalNumber(ternary.elseExpression, viewName: name)
+                let offset = ternary.condition.positionAfterSkippingLeadingTrivia.utf8Offset
+                guard let selected = staticBoolean(ternary.condition)
+                    ?? resolvedDynamicBooleanSites[offset]
+                    ?? resolvedDynamicBooleans[ternary.condition.trimmedDescription] else {
+                    throw RuntimeViewLoweringError.unsupportedArgument(name)
+                }
+                return .padding(edges: .all, length: selected ? whenTrue : whenFalse)
+            }
             return .padding(edges: .all, length: try optionalNumber(first, viewName: name))
         }
 
@@ -1797,6 +1810,13 @@ private final class DynamicBooleanModifierExpressionVisitor: SyntaxVisitor {
             condition = argument.expression
         case "background":
             guard (1...2).contains(node.arguments.count),
+                  let ternary = argument.expression.as(TernaryExprSyntax.self),
+                  ternary.condition.as(BooleanLiteralExprSyntax.self) == nil else {
+                return .visitChildren
+            }
+            condition = ternary.condition
+        case "padding":
+            guard node.arguments.count == 1,
                   let ternary = argument.expression.as(TernaryExprSyntax.self),
                   ternary.condition.as(BooleanLiteralExprSyntax.self) == nil else {
                 return .visitChildren
